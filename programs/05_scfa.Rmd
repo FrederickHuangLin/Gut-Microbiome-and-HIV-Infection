@@ -1,0 +1,765 @@
+---
+title: "Analyses of SCFA"
+author: 
+  - Huang Lin$^1$
+  - $^1$Department of Biostatistics, University of Pittsburgh, 130 De Soto Street, Pittsburgh, PA 15261 USA
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: 
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+# rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, 
+                      message = FALSE, comment = NA,
+                      fig.width = 6.25, fig.height = 5)
+
+library(readr)
+library(tidyverse) 
+library(magrittr)
+library(qwraps2)
+library(ggpubr)
+library(rstatix)
+library(kableExtra)
+options(digits = 3)
+```
+
+# 1. Data description
+
+```{r}
+df_scfa = read_csv("../data/df_merge.csv")
+df_scfa %>% 
+  dplyr::select(acetate, propionate, butyrate, valerate) %>%
+  pastecs::stat.desc() %>% 
+  kable() %>% kable_styling()
+```
+
+# 2. SCFA ~ groups
+
+1. P-value is obtained by ANCOVA test adjusting for age.
+
+2. P-values were not adjusted for multiple comparisons.
+
+```{r}
+options(qwraps2_markup = "markdown")
+summary_template1 =
+  list("Visit" =
+         list("Visit 1" = ~ n_perc0(visit == "Visit 1", na_rm = T),
+              "Visit 2" = ~ n_perc0(visit == "Visit 2", na_rm = T)))
+
+summary_template2 =
+  list("Status" =
+         list("Controls" = ~ n_perc0(status == "NC", na_rm = T),
+              "Seroconverters" = ~ n_perc0(status == "SC", na_rm = T)))
+```
+
+## 2.1 NC: visit 1 vs. visit 2
+
+```{r, results="asis"}
+df = df_scfa %>% filter(status == "nc")
+df$visit = recode(df$visit, `v1` = "Visit 1", `v2` = "Visit 2")
+
+tab = df %>% summary_table(summary_template1)
+print(tab, rtitle = "NC: Visit 1 vs. Visit 2")
+
+df_fig = df %>% group_by(visit) %>%
+    summarise(acetate = mean(acetate, na.rm = TRUE), 
+              butyrate = mean(butyrate, na.rm = TRUE),
+              propionate = mean(propionate, na.rm = TRUE), 
+              valerate = mean(valerate, na.rm = TRUE)) %>%
+    gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_long = df %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_p = df_long %>% group_by(scfa) %>%
+  do(fit = anova_test(data = ., formula = value ~ visit + age)) %>%
+  summarise(p = fit$p[1])
+
+df_jitter = df %>%
+  dplyr::select(visit, acetate:valerate) %>%
+  gather(key = "scfa", value = "value", -visit) %>%
+  group_by(scfa) %>%
+  filter(value >= quantile(value, 0.1, na.rm = TRUE) & 
+           value <= quantile(value, 0.9, na.rm = TRUE))
+df_jitter$scfa = recode(df_jitter$scfa,
+                        acetate = "Acetate", butyrate = "Butyrate", 
+                        propionate = "Propionate", valerate = "Valerate")
+
+df_ann = df_jitter %>% group_by(scfa) %>%
+  summarise(x = 1.1, y = ifelse(mean(value, na.rm = TRUE) > 0, 
+                                max(value, na.rm = TRUE),
+                                0.2 * abs(mean(value, na.rm = TRUE))),
+            y_max = ifelse(mean(value, na.rm = TRUE) > 0, 
+                           1.3 * max(value, na.rm = TRUE),
+                           0.5 * abs(mean(value, na.rm = TRUE))),
+            visit = "Visit 1") %>%
+  mutate(p = df_p$p,
+         label = paste0("p = ", signif(p, 2)))
+df_ann$scfa = recode(df_ann$scfa, 
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+p = ggplot(data = df_fig, aes(x = visit, y = value)) + 
+  geom_col(color = "black", aes(fill = visit)) + 
+  geom_jitter(position = position_jitter(0.2), data = df_jitter, 
+              alpha = 0.5, size = 0.8) +
+  facet_wrap(.~scfa, scales = "free") +
+  labs(x = NULL, y = "Value (ug/mg)") + 
+  labs(title = "NC: Visit 1 vs. Visit 2") + 
+  scale_fill_brewer(name = NULL, palette = "Accent") +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  geom_label(data = df_ann, aes(x = x, y = y, label = label), 
+             size = 4, vjust = -0.5, hjust = 0, color = "black") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+p
+```
+
+## 2.2 SC: visit 1 vs. visit 2
+
+```{r, results="asis"}
+df = df_scfa %>% filter(status == "sc")
+df$visit = recode(df$visit, `v1` = "Visit 1", `v2` = "Visit 2")
+
+tab = df %>% summary_table(summary_template1)
+print(tab, rtitle = "SC: visit 1 vs. visit 2")
+
+df_fig = df %>% group_by(visit) %>%
+    summarise(acetate = mean(acetate, na.rm = TRUE), 
+              butyrate = mean(butyrate, na.rm = TRUE),
+              propionate = mean(propionate, na.rm = TRUE), 
+              valerate = mean(valerate, na.rm = TRUE)) %>%
+    gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_long = df %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_p = df_long %>% group_by(scfa) %>%
+  do(fit = anova_test(data = ., formula = value ~ visit + age)) %>%
+  summarise(p = fit$p[1])
+
+df_jitter$scfa = recode(df_jitter$scfa,
+                        acetate = "Acetate", butyrate = "Butyrate", 
+                        propionate = "Propionate", valerate = "Valerate")
+
+df_ann = df_jitter %>% group_by(scfa) %>%
+  summarise(x = 1.1, y = ifelse(mean(value, na.rm = TRUE) > 0, 
+                                max(value, na.rm = TRUE),
+                                0.2 * abs(mean(value, na.rm = TRUE))),
+            y_max = ifelse(mean(value, na.rm = TRUE) > 0, 
+                           1.3 * max(value, na.rm = TRUE),
+                           0.5 * abs(mean(value, na.rm = TRUE))),
+            visit = "Visit 1") %>%
+  mutate(p = df_p$p,
+         label = paste0("p = ", signif(p, 2)))
+df_ann$scfa = recode(df_ann$scfa, 
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+p = ggplot(data = df_fig, aes(x = visit, y = value)) + 
+  geom_col(color = "black", aes(fill = visit)) + 
+  geom_jitter(position = position_jitter(0.2), data = df_jitter, 
+              alpha = 0.5, size = 0.8) +
+  facet_wrap(.~scfa, scales = "free") +
+  labs(x = NULL, y = "Value (ug/mg)") + 
+  labs(title = "SC: visit 1 vs. visit 2") + 
+  scale_fill_brewer(name = NULL, palette = "Accent") +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  geom_label(data = df_ann, aes(x = x, y = y, label = label), 
+             size = 4, vjust = -0.5, hjust = 0, color = "black") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+p
+```
+
+## 2.3 Visit 1: NC vs. SC
+
+```{r, results="asis"}
+df = df_scfa %>% filter(visit == "v1")
+df$status = recode(df$status, `nc` = "NC", `sc` = "SC")
+
+tab = df %>% summary_table(summary_template2)
+print(tab, rtitle = "Visit 1: NC vs. SC")
+
+df_fig = df %>% group_by(status) %>%
+    summarise(acetate = mean(acetate, na.rm = TRUE), 
+              butyrate = mean(butyrate, na.rm = TRUE),
+              propionate = mean(propionate, na.rm = TRUE), 
+              valerate = mean(valerate, na.rm = TRUE)) %>%
+    gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_long = df %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_p = df_long %>% group_by(scfa) %>%
+  do(fit = anova_test(data = ., formula = value ~ status + age)) %>%
+  summarise(p = fit$p[1])
+
+df_jitter = df %>%
+  dplyr::select(status, acetate:valerate) %>%
+  gather(key = "scfa", value = "value", -status) %>%
+  group_by(scfa) %>%
+  filter(value >= quantile(value, 0.1, na.rm = TRUE) & 
+           value <= quantile(value, 0.9, na.rm = TRUE))
+df_jitter$scfa = recode(df_jitter$scfa,
+                        acetate = "Acetate", butyrate = "Butyrate", 
+                        propionate = "Propionate", valerate = "Valerate")
+
+df_ann = df_jitter %>% group_by(scfa) %>%
+  summarise(x = 1.1, y = ifelse(mean(value, na.rm = TRUE) > 0, 
+                                max(value, na.rm = TRUE),
+                                0.2 * abs(mean(value, na.rm = TRUE))),
+            y_max = ifelse(mean(value, na.rm = TRUE) > 0, 
+                           1.3 * max(value, na.rm = TRUE),
+                           0.5 * abs(mean(value, na.rm = TRUE))),
+            status = "NC") %>%
+  mutate(p = df_p$p,
+         label = paste0("p = ", signif(p, 2)))
+df_ann$scfa = recode(df_ann$scfa, 
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+p = ggplot(data = df_fig, aes(x = status, y = value)) + 
+  geom_col(color = "black", aes(fill = status)) + 
+  geom_jitter(position = position_jitter(0.2), data = df_jitter, 
+              alpha = 0.5, size = 0.8) +
+  facet_wrap(.~scfa, scales = "free") +
+  labs(x = NULL, y = "Value (ug/mg)") + 
+  labs(title = "Visit 1: NC vs. SC") + 
+  scale_fill_discrete(name = NULL) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  geom_label(data = df_ann, aes(x = x, y = y, label = label), 
+             size = 4, vjust = -0.5, hjust = 0, color = "black") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+p
+```
+
+## 2.4 Visit 2: NC vs. SC
+
+```{r, results="asis"}
+df = df_scfa %>% filter(visit == "v2")
+df$status = recode(df$status, `nc` = "NC", `sc` = "SC")
+
+tab = df %>% summary_table(summary_template2)
+print(tab, rtitle = "Visit 2: NC vs. SC")
+
+df_fig = df %>% group_by(status) %>%
+    summarise(acetate = mean(acetate, na.rm = TRUE), 
+              butyrate = mean(butyrate, na.rm = TRUE),
+              propionate = mean(propionate, na.rm = TRUE), 
+              valerate = mean(valerate, na.rm = TRUE)) %>%
+    gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_long = df %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_p = df_long %>% group_by(scfa) %>%
+  do(fit = anova_test(data = ., formula = value ~ status + age)) %>%
+  summarise(p = fit$p[1])
+
+df_jitter = df %>%
+  dplyr::select(status, acetate:valerate) %>%
+  gather(key = "scfa", value = "value", -status) %>%
+  group_by(scfa) %>%
+  filter(value >= quantile(value, 0.1, na.rm = TRUE) & 
+           value <= quantile(value, 0.9, na.rm = TRUE))
+df_jitter$scfa = recode(df_jitter$scfa,
+                        acetate = "Acetate", butyrate = "Butyrate", 
+                        propionate = "Propionate", valerate = "Valerate")
+
+df_ann = df_jitter %>% group_by(scfa) %>%
+  summarise(x = 1.1, y = ifelse(mean(value, na.rm = TRUE) > 0, 
+                                max(value, na.rm = TRUE),
+                                0.2 * abs(mean(value, na.rm = TRUE))),
+            y_max = ifelse(mean(value, na.rm = TRUE) > 0, 
+                           1.3 * max(value, na.rm = TRUE),
+                           0.5 * abs(mean(value, na.rm = TRUE))),
+            status = "NC") %>%
+  mutate(p = df_p$p,
+         label = paste0("p = ", signif(p, 2)))
+df_ann$scfa = recode(df_ann$scfa, 
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+p = ggplot(data = df_fig, aes(x = status, y = value)) + 
+  geom_col(color = "black", aes(fill = status)) + 
+  geom_jitter(position = position_jitter(0.2), data = df_jitter, 
+              alpha = 0.5, size = 0.8) +
+  facet_wrap(.~scfa, scales = "free") +
+  labs(x = NULL, y = "Value (ug/mg)") + 
+  labs(title = "Visit 2: NC vs. SC") + 
+  scale_fill_discrete(name = NULL) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  geom_label(data = df_ann, aes(x = x, y = y, label = label), 
+             size = 4, vjust = -0.5, hjust = 0, color = "black") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+p
+```
+
+# 3. Log2(%CD4/%CD8) ~ SCFA
+
+1. P-values were obtained from linear models adjusting for age.
+
+2. P-values were not adjusted for multiple comparisons.
+
+```{r}
+df_merge = df_scfa %>% 
+  dplyr::select(subjid, visit, status, acetate:valerate, age, vload, leu3p, leu2p) %>%
+  mutate(vload = log10(vload), cd4 = leu3p, cd8 = leu2p, ratio = log(cd4/cd8, base = 2))
+
+lm_eqn = function(m){
+  
+  a = unname(coef(m))[1]
+  b = unname(coef(m))[2]
+  c = unname(coef(m))[3]
+  p_val = summary(m)$coef[2, "Pr(>|t|)"]
+  
+  b = ifelse(sign(b) >= 0, 
+             paste0(" + ", format(b, digits = 2)), 
+             paste0(" - ", format(-b, digits = 2)))
+  c = ifelse(sign(c) >= 0, 
+             paste0(" + ", format(c, digits = 2)), 
+             paste0(" - ", format(-c, digits = 2)))
+  
+  eq = substitute(paste(italic(y) == a, b, italic(x), c, italic(age), ", ", italic(p) == p_val),
+                  list(a = format(a, digits = 2), b = b, c = c,
+                       p_val = format(p_val, digits = 2)))
+  
+  return(as.character(as.expression(eq)))              
+}
+```
+
+## 3.1 NC: Visit 1 vs. Visit 2
+
+```{r, fig.width = 8, fig.height = 10}
+df = df_merge %>% filter(status == "nc")
+df$visit = recode(df$visit, `v1` = "Visit 1", `v2` = "Visit 2")
+
+# Visit 1
+df1 = df %>% filter(visit == "Visit 1")
+df_fig = df1 %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa, 
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_lm = df_fig %>% group_by(scfa) %>%
+  do(fit = lm(formula = ratio ~ value + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(scfa) %>%
+  summarise(x = ifelse(mean(value, na.rm = TRUE) > 0, 
+                       0.6 * max(value, na.rm = TRUE),
+                       0.2 * abs(mean(value, na.rm = TRUE))),
+            y = 2, 
+            y_max = 2.2,
+            value = 0) %>%
+  mutate(eq = df_lm$eq)
+df_ann$scfa = recode(df_ann$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+p1 = ggplot(data = df_fig, aes(x = value, y = ratio)) + 
+  geom_point(alpha = 0.8, color = "#7FC97F") +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  facet_wrap(.~scfa, scales = "free") +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  labs(x = "SCFA", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")),
+       title = "NC: Visit 1") + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), size = 3, 
+            parse = TRUE, inherit.aes = FALSE) + 
+  theme_bw() +
+  theme(strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+
+# Visit 2
+df2 = df %>% filter(visit == "Visit 2")
+df_fig = df2 %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa, 
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_lm = df_fig %>% group_by(scfa) %>%
+  do(fit = lm(formula = ratio ~ value + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(scfa) %>%
+  summarise(x = ifelse(mean(value, na.rm = TRUE) > 0, 
+                       0.6 * max(value, na.rm = TRUE),
+                       0.2 * abs(mean(value, na.rm = TRUE))),
+            y = 2, 
+            y_max = 2.2,
+            value = 0) %>%
+  mutate(eq = df_lm$eq)
+df_ann$scfa = recode(df_ann$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+p2 = ggplot(data = df_fig, aes(x = value, y = ratio)) + 
+  geom_point(alpha = 0.8, color = "#BEAED4") +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  facet_wrap(.~scfa, scales = "free") +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  labs(x = "SCFA", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = "NC: Visit 2") + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), size = 3, 
+            parse = TRUE, inherit.aes = FALSE) + 
+  theme_bw() +
+  theme(strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+
+p = ggarrange(p1, p2, ncol = 1, nrow = 2, legend = "bottom", common.legend = TRUE)
+p
+```
+
+## 3.2 SC: visit 1 vs. visit 2
+
+```{r, fig.width = 8, fig.height = 10}
+df = df_merge %>% filter(status == "sc")
+df$visit = recode(df$visit, `v1` = "Visit 1", `v2` = "Visit 2")
+
+# Visit 1
+df1 = df %>% filter(visit == "Visit 1")
+df_fig = df1 %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa, 
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_lm = df_fig %>% group_by(scfa) %>%
+  do(fit = lm(formula = ratio ~ value + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(scfa) %>%
+  summarise(x = ifelse(mean(value, na.rm = TRUE) > 0, 
+                       0.6 * max(value, na.rm = TRUE),
+                       0.2 * abs(mean(value, na.rm = TRUE))),
+            y = 2,
+            y_max = 2.2,
+            value = 0) %>%
+  mutate(eq = df_lm$eq)
+df_ann$scfa = recode(df_ann$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+p6.1 = ggplot(data = df_fig, aes(x = value, y = ratio)) + 
+  geom_point(alpha = 0.8, color = "#7FC97F") +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  facet_wrap(.~scfa, scales = "free") +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  labs(x = "SCFA", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = "SC: Visit 1") + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), size = 3, 
+            parse = TRUE, inherit.aes = FALSE) + 
+  theme_bw() +
+  theme(strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+
+# Visit 2
+df2 = df %>% filter(visit == "Visit 2")
+df_fig = df2 %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa, 
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_lm = df_fig %>% group_by(scfa) %>%
+  do(fit = lm(formula = ratio ~ value + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(scfa) %>%
+  summarise(x = ifelse(mean(value, na.rm = TRUE) > 0, 
+                       0.6 * max(value, na.rm = TRUE),
+                       0.2 * abs(mean(value, na.rm = TRUE))),
+            y = 2, 
+            y_max = 2.2,
+            value = 0) %>%
+  mutate(eq = df_lm$eq)
+df_ann$scfa = recode(df_ann$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+p6.2 = ggplot(data = df_fig, aes(x = value, y = ratio)) + 
+  geom_point(alpha = 0.8, color = "#BEAED4") +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  facet_wrap(.~scfa, scales = "free") +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  labs(x = "SCFA", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = "SC: Visit 2") + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), size = 3, 
+            parse = TRUE, inherit.aes = FALSE) + 
+  theme_bw() +
+  theme(strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+
+p6 = ggarrange(p6.1, p6.2, ncol = 1, nrow = 2, labels = c("A", "B"), 
+               legend = "bottom", common.legend = TRUE)
+p6
+ggsave(plot = p6, "../images/main/fig6.pdf", height = 8, width = 10)   
+ggsave(plot = p6, "../images/main/fig6.jpeg", height = 8, width = 10, dpi = 300)
+```
+
+## 3.3 Visit 1: NC vs. SC
+
+```{r, fig.width = 8, fig.height = 10}
+df = df_merge %>% filter(visit == "v1")
+df$status = recode(df$status, `nc` = "NC", `sc` = "SC")
+
+# Controls
+df1 = df %>% filter(status == "NC")
+df_fig = df1 %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa, 
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_lm = df_fig %>% group_by(scfa) %>%
+  do(fit = lm(formula = ratio ~ value + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(scfa) %>%
+  summarise(x = ifelse(mean(value, na.rm = TRUE) > 0, 
+                       0.6 * max(value, na.rm = TRUE),
+                       0.2 * abs(mean(value, na.rm = TRUE))),
+            y = 2, 
+            y_max = 2.2,
+            value = 0) %>%
+  mutate(eq = df_lm$eq)
+df_ann$scfa = recode(df_ann$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+p1 = ggplot(data = df_fig, aes(x = value, y = ratio)) + 
+  geom_point(alpha = 0.8, color = "#F8766D") +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  facet_wrap(.~scfa, scales = "free") +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  labs(x = "SCFA", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = "NC") + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), size = 3, 
+            parse = TRUE, inherit.aes = FALSE) + 
+  theme_bw() +
+  theme(strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+
+# Seroconverters
+df2 = df %>% filter(status == "SC")
+df_fig = df2 %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa, 
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_lm = df_fig %>% group_by(scfa) %>%
+  do(fit = lm(formula = ratio ~ value + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(scfa) %>%
+  summarise(x = ifelse(mean(value, na.rm = TRUE) > 0, 
+                       0.6 * max(value, na.rm = TRUE),
+                       0.2 * abs(mean(value, na.rm = TRUE))),
+            y = 2, 
+            y_max = 2.2,
+            value = 0) %>%
+  mutate(eq = df_lm$eq)
+df_ann$scfa = recode(df_ann$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+p2 = ggplot(data = df_fig, aes(x = value, y = ratio)) + 
+  geom_point(alpha = 0.8, color = "#00BFC4") +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  facet_wrap(.~scfa, scales = "free") +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  labs(x = "SCFA", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = "SC") + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), size = 3, 
+            parse = TRUE, inherit.aes = FALSE) + 
+  theme_bw() +
+  theme(strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+
+p = ggarrange(p1, p2, ncol = 1, nrow = 2, legend = "bottom", common.legend = TRUE)
+p
+```
+
+## 3.4 Visit 2: NC vs. SC
+
+```{r, fig.width = 8, fig.height = 10}
+df = df_merge %>% filter(visit == "v2")
+df$status = recode(df$status, `nc` = "NC", `sc` = "SC")
+
+# Controls
+df1 = df %>% filter(status == "NC")
+df_fig = df1 %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa, 
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_lm = df_fig %>% group_by(scfa) %>%
+  do(fit = lm(formula = ratio ~ value + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(scfa) %>%
+  summarise(x = ifelse(mean(value, na.rm = TRUE) > 0, 
+                       0.6 * max(value, na.rm = TRUE),
+                       0.2 * abs(mean(value, na.rm = TRUE))),
+            y = 2, 
+            y_max = 2.2,
+            value = 0) %>%
+  mutate(eq = df_lm$eq)
+df_ann$scfa = recode(df_ann$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+p1 = ggplot(data = df_fig, aes(x = value, y = ratio)) + 
+  geom_point(alpha = 0.8, color = "#F8766D") +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  facet_wrap(.~scfa, scales = "free") +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  labs(x = "SCFA", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = "NC") + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), size = 3, 
+            parse = TRUE, inherit.aes = FALSE) + 
+  theme_bw() +
+  theme(strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+
+# Seroconverters
+df2 = df %>% filter(status == "SC")
+df_fig = df2 %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa, 
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_lm = df_fig %>% group_by(scfa) %>%
+  do(fit = lm(formula = ratio ~ value + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(scfa) %>%
+  summarise(x = ifelse(mean(value, na.rm = TRUE) > 0, 
+                       0.6 * max(value, na.rm = TRUE),
+                       0.2 * abs(mean(value, na.rm = TRUE))),
+            y = 2, 
+            y_max = 2.2,
+            value = 0) %>%
+  mutate(eq = df_lm$eq)
+df_ann$scfa = recode(df_ann$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+p2 = ggplot(data = df_fig, aes(x = value, y = ratio)) + 
+  geom_point(alpha = 0.8, color = "#00BFC4") +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  facet_wrap(.~scfa, scales = "free") +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  labs(x = "SCFA", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = "SC") + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), size = 3, 
+            parse = TRUE, inherit.aes = FALSE) + 
+  theme_bw() +
+  theme(strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+
+p = ggarrange(p1, p2, ncol = 1, nrow = 2, legend = "bottom", common.legend = TRUE)
+p
+```
+
+# 4. Log10(viral load) ~ SCFA
+
+1. For seroconverters at visit 2.
+
+2. P-values were obtained from linear models adjusting for age.
+
+3. P-values were not adjusted for multiple comparisons.
+
+```{r, fig.height = 5, fig.width = 8}
+df = df_merge %>% filter(status == "sc", visit == "v2")
+df_fig = df %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_fig$scfa = recode(df_fig$scfa,
+                     acetate = "Acetate", butyrate = "Butyrate", 
+                     propionate = "Propionate", valerate = "Valerate")
+
+df_lm = df_fig %>% group_by(scfa) %>%
+  do(fit = lm(formula = vload ~ value + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(scfa) %>%
+  summarise(x = ifelse(mean(value, na.rm = TRUE) > 0, 
+                     0.5 * max(value, na.rm = TRUE),
+                     0.2 * abs(mean(value, na.rm = TRUE))),
+          y = 2, 
+          value = 0) %>%
+  mutate(eq = df_lm$eq)
+
+ps6 = ggplot(data = df_fig, aes(x = value, y = vload)) + 
+  geom_point(alpha = 0.8, color = "#BEAED4") +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  facet_wrap(.~scfa, scales = "free") +
+  labs(x = "SCFA", 
+       y = expression(paste(log[10], "(Viral Load)")), 
+       title = "SC: Visit 2") + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), parse = TRUE, 
+            inherit.aes = FALSE, size = 3) + 
+  theme_bw() +
+  theme(strip.background = element_rect(fill = "white"),
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+ps6
+ggsave("../images/supplementary/fig_s6.pdf", height = 5, width = 8) 
+ggsave("../images/supplementary/fig_s6.jpeg", height = 5, width = 8, dpi = 300)
+```
+
+# Session information
+
+```{r, message = FALSE, warning = FALSE, comment = NA}
+sessionInfo()
+```
+
+
+

@@ -1,0 +1,792 @@
+---
+title: "Alpha/Beta Diversities at Family Level"
+author: 
+  - Huang Lin$^1$
+  - $^1$Department of Biostatistics, University of Pittsburgh, 130 De Soto Street, Pittsburgh, PA 15261 USA
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: 
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+# rm(list = ls())
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, 
+                      message = FALSE, comment = NA, 
+                      fig.width = 6.25, fig.height = 5)
+
+library(readr)
+library(openxlsx)
+library(tidyverse) 
+library(microbiome)
+library(vegan)
+library(rstatix)
+library(ggpubr)
+```
+
+```{r data}
+# OTU table
+otu_table = read_tsv("../data/otu-table.tsv")
+otu_id = otu_table$`#OTU ID`
+otu_table = data.frame(otu_table[, -1], check.names = FALSE, row.names = otu_id)
+
+# Taxonomy table
+tax = read_tsv("../data/taxonomy.tsv")
+otu_id = tax$`Feature ID`
+tax = data.frame(tax[, - c(1, 3)], row.names = otu_id)
+tax = tax %>% separate(col = Taxon, 
+                       into = c("Kingdom", "Phylum", "Class", "Order", 
+                                "Family", "Genus", "Species"),
+                       sep = ";")
+for (i in 1:ncol(tax)) {
+  tax[, i] = sapply(tax[, i], function(x) str_split(x, "__")[[1]][2])
+}
+tax = as.matrix(tax)
+tax[tax == ""] = NA
+
+# Tree
+tree = read_tree("../data/tree.nwk")
+
+# Meta data
+meta_data = read_csv("../data/df_merge.csv")
+meta_data$status = factor(meta_data$status, levels = c("nc", "sc"))
+meta_data$visit = factor(meta_data$visit, levels = c("v1", "v2"))
+meta_data = meta_data %>% 
+  transmute(sampleid, subjid, status, visit, visit_num, age, vload,
+            cd4 = leu3p, cd8 = leu2p, ratio = log(cd4/cd8, base = 2))
+```
+
+```{r phyloseq}
+OTU = otu_table(otu_table, taxa_are_rows = TRUE)
+META = sample_data(meta_data)
+sample_names(META) = meta_data$sampleid
+TAX = tax_table(tax)
+otu_data = phyloseq(OTU, TAX, META, tree)
+
+# Aggregate taxa to the family level
+family_data = aggregate_taxa(otu_data, "Family")
+family_rarefied = rarefy_even_depth(family_data, rngseed = 1, 
+                                    sample.size = 0.9 * min(sample_sums(family_data)), 
+                                    replace = FALSE)
+
+# SCs
+sc_family = subset_samples(family_rarefied, status == "sc")
+# NCs
+nc_family = subset_samples(family_rarefied, status == "nc")
+# Visit 1
+v1_family = subset_samples(family_rarefied, visit == "v1")
+# Visit 2
+v2_family = subset_samples(family_rarefied, visit == "v2")
+```
+
+# 1. Alpha diversities
+
+## 1.1 Alpha diversity ~ group
+
+1. Observed species: richness measure, which returns observed richness.
+
+2. Shannon index: diversity measure, which takes into account richness, divergence and evenness.
+
+3. P-value is obtained by ANCOVA test adjusting for age.
+
+```{r}
+d_alpha = alpha(family_rarefied, index = c("observed", "diversity_shannon"))
+df_alpha = data.frame(sampleid = meta(family_rarefied)$sampleid,
+                      subjid = meta(family_rarefied)$subjid,
+                      status = meta(family_rarefied)$status,
+                      visit = meta(family_rarefied)$visit,
+                      visit_num = meta(family_rarefied)$visit_num,
+                      age = meta(family_rarefied)$age,
+                      Observed = d_alpha$observed,
+                      Shannon = d_alpha$diversity_shannon,
+                      check.names = FALSE)
+```
+
+### 1.11 NC: Visit 1 vs. Visit 2
+
+```{r}
+df_fig = df_alpha %>% 
+  filter(status == "nc")
+df_fig_long = df_fig %>% 
+  gather(key = "measure", value = "value", Observed:Shannon)
+df_fig_long$measure = factor(df_fig_long$measure, 
+                             levels = c("Observed", "Shannon"))
+
+df_p = df_fig_long %>% group_by(measure) %>%
+  do(fit = anova_test(data = ., formula = value ~ visit + age)) %>%
+  summarise(p = fit$p[1])
+
+df_ann = df_fig_long %>% group_by(measure) %>%
+  summarise(x = 1.5, y = 1.01 * max(value, na.rm = TRUE),
+            y_max = 1.1 * max(value, na.rm = TRUE),
+            visit = "v1") %>%
+  mutate(p = df_p$p, label = paste0("p = ", signif(p, 2)))
+
+p = ggplot(data = df_fig_long, aes(x = visit, y = value)) + 
+  geom_boxplot(aes(fill = visit)) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  scale_fill_brewer(name = NULL, 
+                    labels = c("v1" = "Visit 1", "v2" = "Visit 2"),
+                    palette = "Accent") +
+  geom_point(alpha = 0.5, shape = 16, position = position_jitter(0.2), size = 0.8) +
+  facet_wrap(.~measure, scale = "free", nrow = 1) + 
+  geom_label(data = df_ann, aes(x = x, y = y, label = label), 
+             size = 4, vjust = -0.5, hjust = 0, color = "black") + 
+  labs(x = NULL, y = NULL, title = "NC: Visit 1 vs. Visit 2") + 
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "bottom",
+        axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+p
+```
+
+### 1.12 SC: Visit 1 vs. Visit 2
+
+```{r}
+df_fig = df_alpha %>% filter(status == "sc")
+df_fig_long = df_fig %>% gather(key = "measure", value = "value", Observed:Shannon)
+df_fig_long$measure = factor(df_fig_long$measure, 
+                             levels = c("Observed", "Shannon"))
+
+df_p = df_fig_long %>% group_by(measure) %>%
+  do(fit = anova_test(data = ., formula = value ~ visit + age)) %>%
+  summarise(p = fit$p[1])
+
+df_ann = df_fig_long %>% group_by(measure) %>%
+  summarise(x = 1.5, y = 1.01 * max(value, na.rm = TRUE),
+            y_max = 1.1 * max(value, na.rm = TRUE),
+            visit = "v1") %>%
+  mutate(p = df_p$p, label = paste0("p = ", signif(p, 2)))
+
+p = ggplot(data = df_fig_long, aes(x = visit, y = value)) + 
+  geom_boxplot(aes(fill = visit)) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  scale_fill_brewer(name = NULL, 
+                    labels = c("v1" = "Visit 1", "v2" = "Visit 2"),
+                    palette = "Accent") +
+  geom_point(alpha = 0.5, shape = 16, position = position_jitter(0.2), size = 0.8) +
+  facet_wrap(.~measure, scale = "free", nrow = 1) + 
+  geom_label(data = df_ann, aes(x = x, y = y, label = label), 
+             size = 4, vjust = -0.5, hjust = 0, color = "black") + 
+  labs(x = NULL, y = NULL, title = "SC: Visit 1 vs. Visit 2") + 
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "bottom",
+        axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+p
+```
+
+### 1.13 Visit 1: NC vs. SC
+
+```{r}
+df_fig = df_alpha %>% filter(visit == "v1")
+df_fig_long = df_fig %>% gather(key = "measure", value = "value", Observed:Shannon)
+df_fig_long$measure = factor(df_fig_long$measure, 
+                             levels = c("Observed", "Shannon"))
+
+df_p = df_fig_long %>% group_by(measure) %>%
+  do(fit = anova_test(data = ., formula = value ~ status + age)) %>%
+  summarise(p = fit$p[1])
+
+df_ann = df_fig_long %>% group_by(measure) %>%
+  summarise(x = 1.5, y = 1.01 * max(value, na.rm = TRUE),
+            y_max = 1.1 * max(value, na.rm = TRUE),
+            status = "nc") %>%
+  mutate(p = df_p$p, label = paste0("p = ", signif(p, 2)))
+
+p2.1 = ggplot(data = df_fig_long, aes(x = status, y = value)) + 
+  geom_boxplot(aes(fill = status)) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  scale_fill_discrete(name = NULL, 
+                      labels = c("nc" = "NC", "sc" = "SC")) +
+  geom_point(alpha = 0.5, shape = 16, position = position_jitter(0.2), size = 0.8) +
+  facet_wrap(.~measure, scale = "free", nrow = 1) + 
+  geom_label(data = df_ann, aes(x = x, y = y, label = label), 
+             size = 4, vjust = -0.5, hjust = 0, color = "black") + 
+  labs(x = NULL, y = NULL, title = "Visit 1: NC vs. SC") + 
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "bottom",
+        axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+```
+
+### 1.14 Visit 2: NC vs. SC
+
+```{r}
+df_fig = df_alpha %>% filter(visit == "v2")
+df_fig_long = df_fig %>% gather(key = "measure", value = "value", Observed:Shannon)
+df_fig_long$measure = factor(df_fig_long$measure, 
+                             levels = c("Observed", "Shannon"))
+
+df_p = df_fig_long %>% group_by(measure) %>%
+  do(fit = anova_test(data = ., formula = value ~ status + age)) %>%
+  summarise(p = fit$p[1])
+
+df_ann = df_fig_long %>% group_by(measure) %>%
+  summarise(x = 1.5, y = 1.01 * max(value, na.rm = TRUE),
+            y_max = 1.1 * max(value, na.rm = TRUE),
+            status = "nc") %>%
+  mutate(p = df_p$p, label = paste0("p = ", signif(p, 2)))
+
+p2.2 = ggplot(data = df_fig_long, aes(x = status, y = value)) + 
+  geom_boxplot(aes(fill = status)) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  scale_fill_discrete(name = NULL, 
+                      labels = c("nc" = "NC", "sc" = "SC")) +
+  geom_point(alpha = 0.5, shape = 16, position = position_jitter(0.2), size = 0.8) +
+  facet_wrap(.~measure, scale = "free", nrow = 1) + 
+  geom_label(data = df_ann, aes(x = x, y = y, label = label), 
+             size = 4, vjust = -0.5, hjust = 0, color = "black") + 
+  labs(x = NULL, y = NULL, title = "Visit 2: NC vs. SC") + 
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "bottom",
+        axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+```
+
+### 1.15 Loss of Alpha Diversity (Visit 2 - Visit 1)
+
+```{r, fig.width=12, fig.height=8}
+df_alpha_wide = df_alpha %>%
+  pivot_wider(id_cols = c(subjid, status, age),
+              names_from = visit,
+              names_glue = "{visit}_{.value}",
+              values_from = Shannon) %>% 
+  transmute(subjid, status, age, shannon_loss = v2_Shannon - v1_Shannon)
+
+df_fig = df_alpha_wide %>% 
+  group_by(status) %>%
+  summarise(shannon_loss = mean(shannon_loss, na.rm = TRUE))
+
+fit = anova_test(data = df_alpha_wide, formula = shannon_loss ~ status + age)
+
+df_jitter = df_alpha_wide %>%
+  filter(shannon_loss >= quantile(shannon_loss, 0.1, na.rm = TRUE) & 
+           shannon_loss <= quantile(shannon_loss, 0.9, na.rm = TRUE))
+
+df_ann = data.frame(x = 1.3, 
+                    y = max(df_jitter$shannon_loss, na.rm = TRUE),
+                    y_max = 1.3 * max(df_jitter$shannon_loss, na.rm = TRUE),
+                    status = "nc", p = fit$p[1]) %>%
+  mutate(label = paste0("p = ", signif(p, 2)))
+
+p2.3 = ggplot(data = df_fig, aes(x = status, y = shannon_loss)) + 
+  geom_col(color = "black", aes(fill = status)) + 
+  geom_jitter(position = position_jitter(0.2), data = df_jitter, 
+              alpha = 0.5, size = 0.8) +
+  labs(x = NULL, y = NULL, 
+       title = "Loss of Shannon Diversity Index (Visit 2 - Visit 1) Between NC and SC") + 
+  scale_fill_discrete(name = NULL, label = c("nc" = "NC", "sc" = "SC")) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  geom_label(data = df_ann, aes(x = x, y = y, label = label), 
+             size = 4, vjust = -0.5, hjust = 0, color = "black") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "right",
+        plot.title = element_text(hjust = 0.5))
+
+leg = get_legend(p2.3)
+p2.1 = p2.1 + theme(legend.position = "none")
+p2.2 = p2.2 + theme(legend.position = "none")
+p2.3 = p2.3 + theme(legend.position = "none")
+p2 = ggarrange(p2.1, p2.2, p2.3, leg, ncol = 2, nrow = 2, 
+               labels = c("A", "B", "C"))
+p2
+ggsave(plot = p2, "../images/main/fig2.pdf", height = 8, width = 12)   
+ggsave(plot = p2, "../images/main/fig2.jpeg", height = 8, width = 12, dpi = 300)
+```
+
+## 1.2 Log2(%CD4/%CD8) ~ alpha diversity
+
+1. P-value is obtained from linear regression model adjusting for age.
+
+```{r}
+df_merge = meta_data %>% 
+  left_join(dplyr::select(df_alpha, subjid, visit, Observed, Shannon), 
+            by = c("subjid", "visit"))
+
+lm_eqn = function(m){
+  
+  a = unname(coef(m))[1]
+  b = unname(coef(m))[2]
+  c = unname(coef(m))[3]
+  p_val = summary(m)$coef[2, "Pr(>|t|)"]
+  
+  b = ifelse(sign(b) >= 0, 
+             paste0(" + ", format(b, digits = 2)), 
+             paste0(" - ", format(-b, digits = 2)))
+  c = ifelse(sign(c) >= 0, 
+             paste0(" + ", format(c, digits = 2)), 
+             paste0(" - ", format(-c, digits = 2)))
+  
+  eq = substitute(paste(italic(y) == a, b, italic(x), c, italic(age), ", ", italic(p) == p_val),
+                  list(a = format(a, digits = 2), b = b, c = c,
+                       p_val = format(p_val, digits = 2)))
+  
+  return(as.character(as.expression(eq)))              
+}
+```
+
+### 1.21 NC: Visit 1 vs. Visit 2
+
+```{r}
+df_fig = df_merge %>% filter(status == "nc")
+df_fig$visit = recode(df_fig$visit, `v1` = "Visit 1", `v2` = "Visit 2")
+
+df_lm = df_fig %>% group_by(visit) %>%
+  do(fit = lm(formula = ratio ~ Shannon + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(visit) %>%
+  summarise(x = quantile(Shannon, probs = 0.25, na.rm = TRUE), 
+            y = 0.2 + max(ratio, na.rm = TRUE),
+            y_max = 0.5 + max(ratio, na.rm = TRUE),
+            Shannon = 1) %>%
+  mutate(eq = df_lm$eq)
+
+p = ggplot(data = df_fig, aes(x = Shannon, y = ratio, color = visit)) + 
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  facet_wrap(.~visit, scale = "free", nrow = 1) + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), parse = TRUE, 
+            inherit.aes = FALSE, size = 3) + 
+  labs(x = "Shannon", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = "NC: Visit 1 vs. Visit 2") + 
+  scale_color_brewer(palette = "Accent") +
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5))
+p
+```
+
+### 1.22 SC: Visit 1 vs. Visit 2
+
+```{r}
+df_fig = df_merge %>% filter(status == "sc")
+df_fig$visit = recode(df_fig$visit, `v1` = "Visit 1", `v2` = "Visit 2")
+
+df_lm = df_fig %>% group_by(visit) %>%
+  do(fit = lm(formula = ratio ~ Shannon + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(visit) %>%
+  summarise(x = quantile(Shannon, probs = 0.25, na.rm = TRUE), 
+            y = 0.2 + max(ratio, na.rm = TRUE),
+            y_max = 0.5 + max(ratio, na.rm = TRUE),
+            Shannon = 1) %>%
+  mutate(eq = df_lm$eq)
+
+p = ggplot(data = df_fig, aes(x = Shannon, y = ratio, color = visit)) + 
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  facet_wrap(.~visit, scale = "free", nrow = 1) + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), parse = TRUE, 
+            inherit.aes = FALSE, size = 3) + 
+  labs(x = "Shannon", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = "SC: Visit 1 vs. Visit 2") + 
+  scale_color_brewer(palette = "Accent") +
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5))
+p
+```
+
+### 1.23 Visit 1: NC vs. SC
+
+```{r}
+df_fig = df_merge %>% filter(visit == "v1")
+df_fig$status = recode(df_fig$status, `nc` = "NC", `sc` = "SC")
+
+df_lm = df_fig %>% group_by(status) %>%
+  do(fit = lm(formula = ratio ~ Shannon + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(status) %>%
+  summarise(x = quantile(Shannon, probs = 0.25, na.rm = TRUE), 
+          y = 0.2 + max(ratio, na.rm = TRUE),
+          y_max = 0.5 + max(ratio, na.rm = TRUE),
+          Shannon = 1) %>%
+  mutate(eq = df_lm$eq)
+
+ps2.1 = ggplot(data = df_fig, aes(x = Shannon, y = ratio, color = status)) + 
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  facet_wrap(.~status, scale = "free", nrow = 1) + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), parse = TRUE, 
+            inherit.aes = FALSE, size = 3) + 
+  labs(x = "Shannon", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = "Visit 1: NC vs. SC") + 
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5))
+```
+
+### 1.24 Visit 2: NC vs. SC
+
+```{r, fig.width=12, fig.height=4}
+df_fig = df_merge %>% filter(visit == "v2")
+df_fig$status = recode(df_fig$status, `nc` = "NC", `sc` = "SC")
+
+df_lm = df_fig %>% group_by(status) %>%
+  do(fit = lm(formula = ratio ~ Shannon + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig %>% group_by(status) %>%
+  summarise(x = quantile(Shannon, probs = 0.25, na.rm = TRUE), 
+          y = 0.2 + max(ratio, na.rm = TRUE),
+          y_max = 0.5 + max(ratio, na.rm = TRUE),
+          Shannon = 1) %>%
+  mutate(eq = df_lm$eq)
+
+ps2.2 = ggplot(data = df_fig, aes(x = Shannon, y = ratio, color = status)) + 
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  facet_wrap(.~status, scale = "free", nrow = 1) + 
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), parse = TRUE, 
+            inherit.aes = FALSE, size = 3) + 
+  labs(x = "Shannon", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = "Visit 2: NC vs. SC") + 
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5))
+
+ps2 = ggarrange(ps2.1, ps2.2, ncol = 2, nrow = 1, 
+                labels = c("A", "B"))
+ps2
+ggsave(plot = ps2, "../images/supplementary/fig_s2.pdf", height = 4, width = 12)   
+ggsave(plot = ps2, "../images/supplementary/fig_s2.jpeg", height = 4, width = 12, dpi = 300)
+```
+
+## 1.3 Log10(viral load) ~ alpha diversity
+
+1. For seroconverters at visit 2.
+
+2. P-value is obtained from linear regression model adjusting for age.
+
+3. The outlier with minimum viral load:  MACS ID: 40791, viral load = 61.
+
+```{r}
+df_fig = df_merge %>% 
+  filter(status == "sc", visit == "v2") %>%
+  mutate(vload = log10(vload))
+
+fit = lm(formula = vload ~ Shannon + age, data = df_fig)
+df_ann = df_fig %>% 
+  summarise(eq = lm_eqn(m = fit),
+            x = quantile(Shannon, probs = 0.5, na.rm = TRUE), 
+            y = 0.2 + max(vload, na.rm = TRUE),
+            y_max = 0.5 + max(vload, na.rm = TRUE),
+            Shannon = 1) 
+
+ps3 = ggplot(data = df_fig, aes(x = Shannon, y = vload)) + 
+  geom_point(alpha = 0.8, color = "#BEAED4") +
+  geom_smooth(method = "lm", se = TRUE, color = "skyblue", 
+              formula = y ~ x) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq), parse = TRUE, 
+            inherit.aes = FALSE, size = 3) + 
+  labs(x = "Shannon", 
+       y = expression(paste(log[10], "(Viral Load)")), 
+       title = "SC at Visit 2") + 
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+ps3
+ggsave("../images/supplementary/fig_s3.pdf", height = 5, width = 6.25) 
+ggsave("../images/supplementary/fig_s3.jpeg", height = 5, width = 6.25, dpi = 300)
+```
+
+# 2. Beta diversity: Bray-Curtis dissimilarity
+
+*P-value is obtained by Permutational Multivariate Analysis of Variance (PERMANOVA).*
+
+*PERMANOVA is used to compare groups of objects and test the null hypothesis that the centroids and dispersion of the groups as defined by measure space are equivalent for all groups.* 
+
+*A rejection of the null hypothesis means that either the centroid and/or the spread of the objects is different between the groups.*
+
+*When collapsing features to the family-level, its taxonomies will not present in the tree. Therefore, we are not able to construct phylogeny-based beta diversities such as UniFrac, but in this case, Bray-Curtis and UniFrac would likely yield pretty similar results.*
+
+## 2.1 Beta diversity ~ group
+
+### 2.11 NC: Visit 1 vs. Visit 2
+
+```{r}
+set.seed(123)
+# PERMANOVA
+permanova = adonis(t(abundances(nc_family)) ~ visit + age, 
+                   data = meta(nc_family), 
+                   permutations = 999, method = "bray")$aov.tab
+
+# PERMDISP
+dis = vegdist(t(abundances(nc_family)), method = "bray")
+groups = meta(nc_family)$visit
+groups = recode(groups, `v1` = "Visit 1", `v2` = "Visit 2")
+mod1 = betadisper(d = dis, group = groups, type = "median")
+lab1 = paste0("PCoA", 1:2, " (", signif(100 * mod1$eig / sum(mod1$eig), 3), "%)")
+p1_1 = signif(permanova$`Pr(>F)`[1], 2)
+p2_1 = signif(permutest(mod1)$tab$`Pr(>F)`[1], 2)
+```
+
+### 2.12 SC: Visit 1 vs. Visit 2
+
+```{r}
+set.seed(123)
+# PERMANOVA
+permanova = adonis(t(abundances(sc_family)) ~ visit + age, 
+                   data = meta(sc_family), 
+                   permutations = 999, method = "bray")$aov.tab
+
+# PERMDISP
+dis = vegdist(t(abundances(sc_family)), method = "bray")
+groups = meta(sc_family)$visit
+groups = recode(groups, `v1` = "Visit 1", `v2` = "Visit 2")
+mod2 = betadisper(d = dis, group = groups, type = "median")
+lab2 = paste0("PCoA", 1:2, " (", signif(100 * mod2$eig / sum(mod2$eig), 3), "%)")
+p1_2 = signif(permanova$`Pr(>F)`[1], 2)
+p2_2 = signif(permutest(mod2)$tab$`Pr(>F)`[1], 2)
+```
+
+### 2.13 Visit 1: NC vs. SC
+
+```{r}
+set.seed(123)
+# PERMANOVA
+permanova = adonis(t(abundances(v1_family)) ~ status + age, 
+                   data = meta(v1_family), 
+                   permutations = 999, method = "bray")$aov.tab
+
+# PERMDISP
+dis = vegdist(t(abundances(v1_family)), method = "bray")
+groups = meta(v1_family)$status
+groups = recode(groups, `nc` = "NC", `sc` = "SC")
+mod3 = betadisper(d = dis, group = groups, type = "median")
+lab3 = paste0("PCoA", 1:2, " (", signif(100 * mod3$eig / sum(mod3$eig), 3), "%)")
+p1_3 = signif(permanova$`Pr(>F)`[1], 2)
+p2_3 = signif(permutest(mod3)$tab$`Pr(>F)`[1], 2)
+```
+
+### 2.14 Visit 2: NC vs. SC
+
+```{r}
+set.seed(123)
+# PERMANOVA
+permanova = adonis(t(abundances(v2_family)) ~ status + age, 
+                   data = meta(v2_family), 
+                   permutations = 999, method = "bray")$aov.tab
+
+# PERMDISP
+dis = vegdist(t(abundances(v2_family)), method = "bray")
+groups = meta(v2_family)$status
+groups = recode(groups, `nc` = "NC", `sc` = "SC")
+mod4 = betadisper(d = dis, group = groups, type = "median")
+lab4 = paste0("PCoA", 1:2, " (", signif(100 * mod4$eig / sum(mod4$eig), 3), "%)")
+p1_4 = signif(permanova$`Pr(>F)`[1], 2)
+p2_4 = signif(permutest(mod4)$tab$`Pr(>F)`[1], 2)
+```
+
+## 2.2 PCoA plot
+
+```{r, fig.height=7, fig.width=9}
+m = matrix(c(1, 2, 3, 4, 5, 5), nrow = 3, ncol = 2, byrow = TRUE)
+layout(mat = m, heights = c(0.45, 0.45, 0.1))
+
+# NC: v1 vs. v2
+plot(mod1, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "NC: Visit 1 vs. Visit 2", 
+     xlab = lab1[1], ylab = lab1[2], ylim = c(-0.4, 0.6), xaxt = "n",
+     col = c("#7FC97F", "#BEAED4"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+legend(x = 0.6, y = 0.6, cex = 1,
+       legend = c(paste0("p1 = ", p1_1),
+                  paste0("p2 = ", p2_1)))
+mtext(text = "A", side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+# SC: v1 vs. v2
+plot(mod2, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "SC: Visit 1 vs. Visit 2", 
+     xlab = lab2[1], ylab = lab2[2], ylim = c(-0.4, 0.6), xaxt = "n",
+     col = c("#7FC97F", "#BEAED4"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+legend(x = 0.5, y = 0.6, cex = 1,
+       legend = c(paste0("p1 = ", p1_2),
+                  paste0("p2 = ", p2_2)))
+mtext(text = "B", side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+# V1: NC vs. SC
+plot(mod3, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "Visit 1: NC vs. SC", 
+     xlab = lab3[1], ylab = lab3[2],
+     col = c("#F8766D", "#00BFC4"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+legend(x = 0.45, y = -0.15, cex = 1,
+       legend = c(paste0("p1 = ", p1_3),
+                  paste0("p2 = ", p2_3)))
+mtext(text = "C", side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+# V2: NC vs. SC
+plot(mod4, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "Visit 2: NC vs. SC", 
+     xlab = lab4[1], ylab = lab4[2], ylim = c(-0.6, 0.4), xaxt = "n",
+     col = c("#F8766D", "#00BFC4"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+legend(x = 0.45, y = -0.4, cex = 1,
+       legend = c(paste0("p1 = ", p1_4),
+                  paste0("p2 = ", p2_4)))
+mtext(text = "D", side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+
+par(mar = c(0, 0, 2, 0))
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+legend(x = "top", inset = 0, lwd = 5, cex = 1, horiz = TRUE,
+       legend = c("Visit 1", "Visit 2", "NC", "SC"), 
+       col = c("#7FC97F", "#BEAED4", "#F8766D", "#00BFC4"))
+
+# PDF
+pdf(file = "../images/main/fig3.pdf", height = 7, width = 9)
+
+m = matrix(c(1, 2, 3, 4, 5, 5), nrow = 3, ncol = 2, byrow = TRUE)
+layout(mat = m, heights = c(0.45, 0.45, 0.1))
+
+# NC: v1 vs. v2
+plot(mod1, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "NC: Visit 1 vs. Visit 2", 
+     xlab = lab1[1], ylab = lab1[2], ylim = c(-0.4, 0.6), xaxt = "n",
+     col = c("#7FC97F", "#BEAED4"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+legend(x = 0.6, y = 0.6, cex = 1,
+       legend = c(paste0("p1 = ", p1_1),
+                  paste0("p2 = ", p2_1)))
+mtext(text = "A", side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+# SC: v1 vs. v2
+plot(mod2, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "SC: Visit 1 vs. Visit 2", 
+     xlab = lab2[1], ylab = lab2[2], ylim = c(-0.4, 0.6), xaxt = "n",
+     col = c("#7FC97F", "#BEAED4"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+legend(x = 0.5, y = 0.6, cex = 1,
+       legend = c(paste0("p1 = ", p1_2),
+                  paste0("p2 = ", p2_2)))
+mtext(text = "B", side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+# V1: NC vs. SC
+plot(mod3, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "Visit 1: NC vs. SC", 
+     xlab = lab3[1], ylab = lab3[2],
+     col = c("#F8766D", "#00BFC4"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+legend(x = 0.45, y = -0.15, cex = 1,
+       legend = c(paste0("p1 = ", p1_3),
+                  paste0("p2 = ", p2_3)))
+mtext(text = "C", side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+# V2: NC vs. SC
+plot(mod4, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "Visit 2: NC vs. SC", 
+     xlab = lab4[1], ylab = lab4[2], ylim = c(-0.6, 0.4), xaxt = "n",
+     col = c("#F8766D", "#00BFC4"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+legend(x = 0.45, y = -0.4, cex = 1,
+       legend = c(paste0("p1 = ", p1_4),
+                  paste0("p2 = ", p2_4)))
+mtext(text = "D", side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+
+par(mar = c(0, 0, 2, 0))
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+legend(x = "top", inset = 0, lwd = 5, cex = 1, horiz = TRUE,
+       legend = c("Visit 1", "Visit 2", "NC", "SC"), 
+       col = c("#7FC97F", "#BEAED4", "#F8766D", "#00BFC4"))
+
+dev.off()
+
+# JPEG
+jpeg(filename = "../images/main/fig3.jpeg", 
+     height = 7, width = 9, res = 300, units = "in")
+
+m = matrix(c(1, 2, 3, 4, 5, 5), nrow = 3, ncol = 2, byrow = TRUE)
+layout(mat = m, heights = c(0.45, 0.45, 0.1))
+
+# NC: v1 vs. v2
+plot(mod1, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "NC: Visit 1 vs. Visit 2", 
+     xlab = lab1[1], ylab = lab1[2], ylim = c(-0.4, 0.6), xaxt = "n",
+     col = c("#7FC97F", "#BEAED4"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+legend(x = 0.6, y = 0.6, cex = 1,
+       legend = c(paste0("p1 = ", p1_1),
+                  paste0("p2 = ", p2_1)))
+mtext(text = "A", side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+# SC: v1 vs. v2
+plot(mod2, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "SC: Visit 1 vs. Visit 2", 
+     xlab = lab2[1], ylab = lab2[2], ylim = c(-0.4, 0.6), xaxt = "n",
+     col = c("#7FC97F", "#BEAED4"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+legend(x = 0.5, y = 0.6, cex = 1,
+       legend = c(paste0("p1 = ", p1_2),
+                  paste0("p2 = ", p2_2)))
+mtext(text = "B", side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+# V1: NC vs. SC
+plot(mod3, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "Visit 1: NC vs. SC", 
+     xlab = lab3[1], ylab = lab3[2],
+     col = c("#F8766D", "#00BFC4"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+legend(x = 0.45, y = -0.15, cex = 1,
+       legend = c(paste0("p1 = ", p1_3),
+                  paste0("p2 = ", p2_3)))
+mtext(text = "C", side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+# V2: NC vs. SC
+plot(mod4, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "Visit 2: NC vs. SC", 
+     xlab = lab4[1], ylab = lab4[2], ylim = c(-0.6, 0.4), xaxt = "n",
+     col = c("#F8766D", "#00BFC4"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+legend(x = 0.45, y = -0.4, cex = 1,
+       legend = c(paste0("p1 = ", p1_4),
+                  paste0("p2 = ", p2_4)))
+mtext(text = "D", side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+
+par(mar = c(0, 0, 2, 0))
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+legend(x = "top", inset = 0, lwd = 5, cex = 1, horiz = TRUE,
+       legend = c("Visit 1", "Visit 2", "NC", "SC"), 
+       col = c("#7FC97F", "#BEAED4", "#F8766D", "#00BFC4"))
+
+dev.off()
+```
+
+# Session information
+
+```{r, message = FALSE, warning = FALSE, comment = NA}
+sessionInfo()
+```

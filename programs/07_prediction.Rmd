@@ -1,0 +1,385 @@
+---
+title: "Prediction"
+author: 
+  - Huang Lin$^1$
+  - $^1$Department of Biostatistics, University of Pittsburgh, 130 De Soto Street, Pittsburgh, PA 15261 USA
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: 
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+# rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, 
+                      message = FALSE, comment = NA,
+                      fig.width = 6.25, fig.height = 5)
+
+library(readr)
+library(tidyverse) 
+library(microbiome)
+library(rstatix)
+library(corrplot)
+library(DT)
+options(DT.options = list(
+  initComplete = JS("function(settings, json) {",
+  "$(this.api().table().header()).css({'background-color': '#000', 'color': '#fff'});","}")))
+```
+
+```{r data}
+df_merge = read_csv("../data/df_merge.csv")
+
+# OTU table
+otu_table = read_tsv("../data/otu-table.tsv")
+otu_id = otu_table$`#OTU ID`
+otu_table = data.frame(otu_table[, -1], check.names = FALSE, row.names = otu_id)
+
+# Taxonomy table
+tax = read_tsv("../data/taxonomy.tsv")
+otu_id = tax$`Feature ID`
+tax = data.frame(tax[, - c(1, 3)], row.names = otu_id)
+tax = tax %>% separate(col = Taxon, 
+                       into = c("Kingdom", "Phylum", "Class", "Order", 
+                                "Family", "Genus", "Species"),
+                       sep = ";")
+for (i in 1:ncol(tax)) {
+  tax[, i] = sapply(tax[, i], function(x) str_split(x, "__")[[1]][2])
+}
+tax = as.matrix(tax)
+tax[tax == ""] = NA
+
+# Tree
+tree = read_tree("../data/tree.nwk")
+
+# Meta data
+meta_data = read_tsv("../data/meta_data.tsv")
+meta_data$status = factor(meta_data$status, levels = c("nc", "sc"))
+meta_data$visit = factor(meta_data$visit, levels = c("v1", "v2"))
+rownames(meta_data) = meta_data$sampleid
+
+# Phyloseq object
+OTU = otu_table(otu_table, taxa_are_rows = TRUE)
+META = sample_data(meta_data)
+sample_names(META) = meta_data$sampleid
+TAX = tax_table(tax)
+otu_data = phyloseq(OTU, TAX, META, tree)
+
+# Aggregate taxa to the family level
+family_data = aggregate_taxa(otu_data, "Family")
+family_rarefied = rarefy_even_depth(family_data, rngseed = 1, 
+                                    sample.size = 0.9 * min(sample_sums(family_data)), 
+                                    replace = FALSE)
+
+# Alpha diversities
+alpha_family = alpha(family_rarefied, index = "diversity_shannon")
+
+df_alpha = data.frame(sampleid = meta(family_rarefied)$sampleid,
+                      shannon = alpha_family$diversity_shannon)
+
+# Prevotellaceae to Bacteroidaceae
+df_pb = abundances(family_data)
+df_pb = df_pb[c("Prevotellaceae", "Bacteroidaceae"), ]
+df_pb = data.frame(t(df_pb), check.names = FALSE) %>% 
+  rownames_to_column("sampleid")
+
+# Family data
+df_family = data.frame(t(abundances(family_data)), check.names = FALSE) %>%
+  rownames_to_column("sampleid")
+
+df = df_merge %>%
+  left_join(df_alpha, by = "sampleid") %>%
+  left_join(df_pb, by = "sampleid")
+
+df_wide = df %>%
+  pivot_wider(id_cols = c(subjid, status, time2aids, age),
+              names_from = visit,
+              names_glue = "{visit}_{.value}",
+              values_from = il6:Bacteroidaceae)
+```
+
+# 1. Log2(%CD4/%CD8) at visit 2 vs. alpha diversity at visit 1
+
+1. Microbial diversity at visit 1 is more negatively correlated with CD4/CD8 among seroconverters than among controls.
+
+2. As the diversity before seroconversion increases, the CD4/CD8 ratio decreases among the serconverters more quickly. This is possibly because controls have a rich diverse ecology of commensal bacteria that are protective, whereas the seroconverters, before seroconversion have a potential loss of commensal bacterial and a possible increase in opportunistic and pathogenic bacteria. As their diversity
+Increases, it appears that the CD4/CD8 decreases dramatically for seroconverters. 
+
+3. P-value is obtained from linear regression model adjusting for age.
+
+```{r}
+lm_eqn = function(m){
+  
+  a = unname(coef(m))[1]
+  b = unname(coef(m))[2]
+  c = unname(coef(m))[3]
+  p_val = summary(m)$coef[2, "Pr(>|t|)"]
+  
+  b = ifelse(sign(b) >= 0, 
+             paste0(" + ", format(b, digits = 2)), 
+             paste0(" - ", format(-b, digits = 2)))
+  c = ifelse(sign(c) >= 0, 
+             paste0(" + ", format(c, digits = 2)), 
+             paste0(" - ", format(-c, digits = 2)))
+  
+  eq = substitute(paste(italic(y) == a, b, italic(x), c, italic(age), ", ", italic(p) == p_val),
+                  list(a = format(a, digits = 2), b = b, c = c,
+                       p_val = format(p_val, digits = 2)))
+  
+  return(as.character(as.expression(eq)))              
+}
+
+df_fig1 = df_wide %>% transmute(subjid, status, age,
+                                cd4 = v2_leu3p, cd8 = v2_leu2p,
+                                ratio = log(cd4/cd8, base = 2), 
+                                shannon = v1_shannon)
+
+df_lm = df_fig1 %>% group_by(status) %>%
+  do(fit = lm(formula = shannon ~ ratio + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig1 %>% 
+  group_by(status) %>%
+  summarise(ratio = 1, shannon = 0) %>%
+  mutate(eq = df_lm$eq,
+         x = c(0.6, 1), y = c(1.5, 0), status = c("nc", "sc"))
+
+ps8 = ggplot(data = df_fig1, aes(x = shannon, y = ratio, color = status)) + 
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_color_discrete(name = NULL, label = c("nc" = "NC", "sc" = "SC")) +
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq, color = status), 
+            parse = TRUE, inherit.aes=FALSE) + 
+  labs(x = "Shannon", 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")",
+                                " at Visit 2 vs. Shannon Diversity Index at Visit 1"))) + 
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+ps8
+ggsave("../images/supplementary/fig_s8.pdf", height = 5, width = 6.25)
+ggsave("../images/supplementary/fig_s8.jpeg", height = 5, width = 6.25, dpi = 300)
+```
+
+# 2. Log2(%CD4/%CD8) at visit 2 vs. log2(valerate/propionate) at visit 1
+
+1. Reduction in propionic acid relative to valeric acid reduces CD4 counts relative to CD8 among seroconverters more quickly than among controls.
+
+2. P-value is obtained from linear regression model adjusting for age.
+
+```{r}
+df_fig2.1 = df_wide %>% 
+  transmute(subjid, status, age,
+            cd4 = v2_leu3p, cd8 = v2_leu2p,
+            valerate = v1_valerate, propionate = v1_propionate,
+            ratio1 = log(cd4/cd8, base = 2), 
+            ratio2 = log(valerate/propionate, base = 2))
+
+df_lm = df_fig2.1 %>% 
+  group_by(status) %>%
+  do(fit = lm(formula = ratio1 ~ ratio2 + age, data = .)) %>%
+  summarise(eq = lm_eqn(m = fit))
+
+df_ann = df_fig2.1 %>% 
+  group_by(status) %>%
+  summarise(ratio = 1, shannon = 0) %>%
+  mutate(eq = df_lm$eq,
+         x = c(-4, -4), y = c(1.5, -0.5), status = c("nc", "sc"))
+
+p = ggplot(data = df_fig2.1, aes(x = ratio2, y = ratio1, color = status)) + 
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_color_discrete(name = NULL, label = c("nc" = "NC", "sc" = "SC")) +
+  geom_text(data = df_ann, aes(x = x, y = y, label = eq, color = status), 
+            parse = TRUE, inherit.aes = FALSE) + 
+  labs(x = expression(paste(log[2], "(Valerate/Propionate)")), 
+       y = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ")")), 
+       title = expression(paste(log[2], "(", CD4^{"+"}, "/", CD8^{"+"}, ") at Visit 2 vs. ",
+                                log[2], "(Valerate/Propionate) at Visit 1"))) +
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+p
+```
+
+# 3. Microbiome
+
+## 3.1 Log2(prevotellaceae/bacteroidaceae) at visit 1 vs. status.
+
+1. Absolute abundance of prevotellaceae relative to bacteroidaceae at visit 1 is highly correlated with seroconversion at a future visit.
+
+2. P-value is obtained by ANCOVA test adjusting for age.
+
+```{r}
+df_fig3.1_raw = df_wide %>% 
+  transmute(subjid, status, age, 
+            prev = v1_Prevotellaceae,
+            bact = v1_Bacteroidaceae,
+            ratio = log(prev/bact, base = 2)) %>%
+  filter(is.finite(ratio))
+
+df_fig3.1 = df_fig3.1_raw %>% 
+  group_by(status) %>%
+  summarise(ratio = mean(ratio, na.rm = TRUE))
+
+tab3.1 = df_fig3.1
+col_name = c("Status", "Log2(Prevotellaceae/Bacteroidaceae)")
+colnames(tab3.1) = col_name
+tab3.1 %>% 
+  datatable(caption = "Log2(Prevotellaceae/Bacteroidaceae) at Visit 1 vs. Status") %>%
+  formatRound(col_name[-1], digits = 2)
+
+df_jitter = df_fig3.1_raw %>%
+  filter(ratio >= quantile(ratio, 0.1, na.rm = TRUE) & 
+           ratio <= quantile(ratio, 0.9, na.rm = TRUE))
+
+df_ann = data.frame(x = 1.3, 
+                    y = max(df_jitter$ratio, na.rm = TRUE),
+                    y_max = 1.3 * max(df_jitter$ratio, na.rm = TRUE),
+                    status = "nc", ratio = 1, 
+                    p = anova_test(data = df_fig3.1_raw, 
+                                   formula = ratio ~ status + age)$p[1]) %>%
+  mutate(label = paste0("p = ", signif(p, 2)))
+
+p = ggplot(data = df_fig3.1, aes(x = status, y = ratio)) + 
+  geom_col(color = "black", aes(fill = status)) + 
+  geom_jitter(position = position_jitter(0.2), data = df_jitter, 
+              alpha = 0.5, size = 0.8) +
+  labs(x = NULL, y = NULL, 
+       title = expression(paste(log[2], "(Prevotellaceae/Bacteroidaceae) at Visit 1 vs. Status"))) +
+  scale_fill_discrete(name = NULL, 
+                      label = c("nc" = "NC", "sc" = "SC")) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  geom_label(data = df_ann, aes(x = x, y = y, label = label),
+             size = 4, vjust = -0.5, hjust = 0, color = "black") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+p
+```
+
+## 3.2 Correlations between significant families and pro-inflammatory cytokines at visit 1
+
+```{r}
+df_fig3.2_raw = df %>% 
+  dplyr::select(-Prevotellaceae, -Bacteroidaceae) %>%
+  left_join(df_family, by = "sampleid") %>%
+  filter(visit == "v1") %>%
+  transmute(status, CD14 = cd14, CD163 = cd163, `IL-6` = il6, LBP = lbp,
+            Succinivibrionaceae, `S24-7`, `[Mogibacteriaceae]`,
+            Coriobacteriaceae, Erysipelotrichaceae, `[Odoribacteraceae]`,
+            Verrucomicrobiaceae, Bacteroidaceae, `[Barnesiellaceae]`, 
+            Rikenellaceae)
+
+df_fig3.2_nc = df_fig3.2_raw %>%
+  filter(status == "nc") %>%
+  dplyr::select(-status) %>%
+  mutate_if(is.numeric, scale)
+
+df_fig3.2_sc = df_fig3.2_raw %>%
+  filter(status == "sc") %>%
+  dplyr::select(-status) %>%
+  mutate_if(is.numeric, scale) %>%
+  mutate_if(is.numeric, scale)
+
+# NC
+mat_cor_nc = round(cor(df_fig3.2_nc, use = "complete.obs"), 2)
+
+corrplot(mat_cor_nc, method = "circle") %>%
+  corrRect(index = c(1, 5, 14))
+
+# SC
+mat_cor_sc = round(cor(df_fig3.2_sc, use = "complete.obs"), 2)
+
+corrplot(mat_cor_sc, method = "circle") %>%
+  corrRect(index = c(1, 5, 14))
+```
+
+# 4. Prediction model
+
+1. Age, alpha diversity, log ratio of prevotellaceae to bacteroidaceae, and log ratio of valerate to propionate at visit 1 predicts seroconversion at a future visit.
+
+```{r}
+df_fig4 = df_wide %>% 
+  transmute(subjid, status, age, 
+            shannon = v1_shannon,
+            vale = ifelse(v1_valerate == 0, NA, log(v1_valerate, base = 2)), 
+            prop = ifelse(v1_propionate == 0, NA, log(v1_propionate, base = 2)),
+            prev = ifelse(v1_Prevotellaceae == 0, NA, log(v1_Prevotellaceae, base = 2)),
+            bact = ifelse(v1_Bacteroidaceae == 0, NA, log(v1_Bacteroidaceae, base = 2)),
+            ratio1 = prev - bact,
+            ratio2 = vale - prop) %>%
+  mutate(prob = ifelse(status == "sc", 1, 0))
+df_fig4$status = factor(df_fig4$status)
+```
+
+## 4.1 Model 1: status (NC vs. SC) ~ age + alpha diversity + log2(prevotellaceae/bacteroidaceae) + log2(valerate/propionate)
+
+```{r}
+fit1 = glm(status ~ age + ratio1 + ratio2 + shannon, 
+           family = "binomial", data = df_fig4) 
+tab4.1 = rstatix::tidy(fit1)
+tab4.1$term = c("Intercept", "Age", "Log2(Prevotellaceae/Bacteroidaceae)",
+                "Log2(Valerate/Propionate)", "Shannon")
+tab4.1 %>% datatable(caption = "Model 1") %>%
+  formatRound(colnames(tab4.1)[-1], digits = 3)
+```
+
+## 4.2 Model 2: status (NC vs. SC) ~ age + alpha diversity + log2(prevotellaceae/bacteroidaceae)
+
+```{r}
+fit2 = glm(status ~ age + ratio1 + shannon, family = "binomial", data = df_fig4) 
+tab4.2 = rstatix::tidy(fit2)
+tab4.2$term = c("Intercept", "Age", "Log2(Prevotellaceae/Bacteroidaceae)", "Shannon")
+tab4.2 %>% datatable(caption = "Model 2") %>%
+  formatRound(colnames(tab4.2)[-1], digits = 3)
+```
+
+## 4.3 Model 3: status (NC vs. SC) ~ age + log2(prevotellaceae/bacteroidaceae)
+
+```{r, fig.height=5, fig.width=10}
+fit3 = glm(status ~ age + ratio1, family = "binomial", data = df_fig4) 
+tab4.3 = rstatix::tidy(fit3)
+tab4.3$term = c("Intercept", "Age", "Log2(Prevotellaceae/Bacteroidaceae)")
+tab4.3 %>% datatable(caption = "Model 3") %>%
+  formatRound(colnames(tab4.3)[-1], digits = 3)
+
+df_fig4_long = df_fig4 %>% 
+  dplyr::select(subjid, prob, age, ratio1) %>%
+  gather(key = "measure", value = "value", age:ratio1)
+df_fig4_long$measure = recode(df_fig4_long$measure,
+                              age = "Age", 
+                              ratio1 = "Log2(Prevotellaceae/Bacteroidaceae)")
+df_fig4_long2 = df_fig4_long %>%
+  filter(measure == "Log2(Prevotellaceae/Bacteroidaceae)")
+
+df_ann = data.frame(measure = "Log2(Prevotellaceae/Bacteroidaceae)", 
+                    x = 1, y = 0.7, prob = 1, 
+                    p = coef(summary(fit3))["ratio1", "Pr(>|z|)"]) %>%
+  mutate(label = paste0("p = ", signif(p, 2)))
+
+p = df_fig4_long2 %>% ggplot(aes(x = value, y = prob)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  labs(x = expression(paste(log[2], "(Prevotellaceae/Bacteroidaceae)")), 
+       y = "Probability of Seroconversion", 
+       title = "Probability of Seroconversion Predicted by Logistic Regression Model") +
+  geom_label(data = df_ann, aes(x = x, y = y, label = label),
+             size = 4, vjust = -0.5, hjust = 0, color = "black") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        strip.background = element_rect(fill = "white"),
+        plot.title = element_text(hjust = 0.5))
+p
+```
+
+# Session information
+
+```{r, message = FALSE, warning = FALSE, comment = NA}
+sessionInfo()
+```
+
+

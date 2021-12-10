@@ -1,0 +1,794 @@
+---
+title: "AIDS Microbiome Differential Abundance Analyses"
+author: 
+  - Huang Lin$^1$
+  - $^1$Department of Biostatistics, University of Pittsburgh, 130 De Soto Street, Pittsburgh, PA 15261 USA
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: 
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+# rm(list = ls())
+
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE, 
+                      comment=NA, fig.width = 8, fig.height = 6)
+
+library(readr)
+library(tidyverse) 
+library(microbiome)
+library(ggpubr)
+
+source("../programs/00_ancom_bc.R")
+```
+
+```{r data}
+# OTU table
+otu_table = read_tsv("../data/otu-table.tsv")
+otu_id = otu_table$`#OTU ID`
+otu_table = data.frame(otu_table[, -1], check.names = FALSE, row.names = otu_id)
+
+# Taxonomy table
+tax = read_tsv("../data/taxonomy.tsv")
+otu_id = tax$`Feature ID`
+tax = data.frame(tax[, - c(1, 3)], row.names = otu_id)
+tax = tax %>% 
+  separate(col = Taxon, 
+           into = c("Kingdom", "Phylum", "Class", "Order", 
+                    "Family", "Genus", "Species"),
+           sep = ";") %>%
+  rowwise() %>%
+  dplyr::mutate_all(function(x) strsplit(x, "__")[[1]][2]) %>%
+  mutate(Species = ifelse(!is.na(Species) & !is.na(Genus),
+                          paste(ifelse(strsplit(Genus, "")[[1]][1] == "[",
+                                       strsplit(Genus, "")[[1]][2],
+                                       strsplit(Genus, "")[[1]][1]), Species, sep = "."),
+                          NA)) %>%
+  ungroup()
+tax = as.matrix(tax)
+rownames(tax) = otu_id
+tax[tax == ""] = NA
+
+# Tree
+tree = read_tree("../data/tree.nwk")
+
+# Meta data
+meta_data = read_csv("../data/df_merge.csv")
+meta_data$status = factor(meta_data$status, levels = c("nc", "sc"))
+meta_data$visit = factor(meta_data$visit, levels = c("v1", "v2"))
+meta_data$time2aids = recode(meta_data$time2aids, 
+                             `0-2` = "< 5 yrs", `2-5` = "< 5 yrs",
+                             `5-7` = "5 - 10 yrs", `7-10` = "5 - 10 yrs",
+                             `10+` = "> 10 yrs", `never` = "non")
+meta_data$time2aids = factor(meta_data$time2aids,
+                             levels = c("non", "> 10 yrs",
+                                        "5 - 10 yrs", "< 5 yrs"))
+
+# Phyloseq object
+OTU = otu_table(otu_table, taxa_are_rows = TRUE)
+META = sample_data(meta_data)
+sample_names(META) = meta_data$sampleid
+TAX = tax_table(tax)
+otu_data = phyloseq(OTU, TAX, META, tree)
+
+family_data = aggregate_taxa(otu_data, "Family")
+
+genus_data = aggregate_taxa(otu_data, "Genus")
+genus_data2 = merge_taxa2(genus_data, 
+                          pattern = "\\_Clostridium", 
+                          name = "Clostridium")
+genus_data3 = merge_taxa2(genus_data2, 
+                          pattern = "\\_Ruminococcus", 
+                          name = "Ruminococcus")
+genus_table = genus_data3@tax_table@.Data
+
+species_data = aggregate_taxa(otu_data, "Species")
+species_data2 = merge_taxa2(species_data, 
+                            pattern = "\\variabile", 
+                            name = "Subdoligranulum variabile")
+species_table = species_data2@tax_table@.Data
+```
+
+```{r function1}
+two_group_pipeline = function(pseq, sample_id, adj_formula, group, 
+                              p_adj_method, zero_cut, lib_cut, neg_lb, alpha){
+  feature_table = abundances(pseq); meta_data = meta(pseq)
+  struc_zero = TRUE; tol = 1e-5; max_iter = 100; conserve = FALSE; per_num = 1000
+  global = FALSE; direct = FALSE; dunnett = FALSE; pattern = NULL
+  out = ANCOM_BC(feature_table, meta_data, sample_id, adj_formula, p_adj_method, 
+                 zero_cut, lib_cut, struc_zero, neg_lb, group, 
+                 tol, max_iter, conserve, alpha, per_num,
+                 global, direct, dunnett, pattern)
+  res = out$res
+  
+  # =============================== Waterfall plot =============================
+  # Use p-values instead of q-values to make plots
+  ind_diff = res$p_val < alpha
+  res_beta = data.frame(res$beta * ind_diff, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  res_se = data.frame(res$se * ind_diff, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  res_p = data.frame(res$p * ind_diff, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  res_q = data.frame(res$q * ind_diff, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+
+  res_zero = out$zero_ind[[1]]
+  res_zero = res_zero - res_zero[, 1]
+  res_zero = abs(res_zero[, -1, drop = FALSE])
+  res_zero = data.frame(res_zero, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  
+  # Coerce the SE of structural zero to be zero
+  res_se[, grepl(group, colnames(res_se))] = res_se[, grepl(group, colnames(res_se))] *
+    (1 - res_zero[, grepl(group, colnames(res_zero))])
+
+  res_beta = res_beta %>%
+    pivot_longer(cols = -taxon_id, names_to = "var", values_to = "lfc")
+  res_se = res_se %>%
+    pivot_longer(cols = -taxon_id, names_to = "var", values_to = "se")
+  res_p = res_p %>%
+    pivot_longer(cols = -taxon_id, names_to = "var", values_to = "p")
+  res_q = res_q %>%
+    pivot_longer(cols = -taxon_id, names_to = "var", values_to = "q")
+  
+  res_model = res_beta %>% 
+    left_join(res_se) %>%
+    left_join(res_p) %>%
+    left_join(res_q) %>%
+    left_join(res_zero, by = "taxon_id")
+  
+  # Waterfall plot for the covariate of interest
+  dat_fig1 = res_model %>%
+    filter(grepl(group, var),
+           lfc != 0) %>%
+    arrange(desc(lfc)) %>%
+    mutate(type = if_else(lfc > 0, "g1", "g2"),
+           star = case_when(p < .001 ~ "***",
+                            p < .01 ~ "**",
+                            TRUE ~ "*"),
+           color = if_else(q < .05, 1, 0),
+           pos = if_else(type == "g1", 
+                         lfc + se + 0.2,
+                         lfc - se - 0.2)
+    )
+  dat_fig1$taxon_id = factor(dat_fig1$taxon_id, 
+                             levels = unique(dat_fig1$taxon_id))
+  
+  if (nrow(dat_fig1) != 0) {
+    p_waterfall = dat_fig1 %>%
+      ggplot(aes(x = taxon_id, y = lfc, 
+                 fill = type, color = type)) + 
+      geom_bar(stat = "identity", width = 0.7, 
+               position = position_dodge(width = 0.4)) +
+      geom_errorbar(aes(ymin = lfc - se, 
+                        ymax = lfc + se), 
+                    width = 0.2,
+                    position = position_dodge(0.05), color = "black") + 
+      geom_text(aes(y = pos, label = star), 
+                vjust = .7, color = "black", 
+                position = position_dodge(width = 0.05)) +
+      labs(x = NULL, y = "Log fold change") +
+      guides(color = FALSE) +
+      theme_bw() + 
+      theme(panel.grid.minor.y = element_blank(),
+            axis.text.x = element_text(size = 10, face = "bold",
+                                       color = ifelse(dat_fig1$color == 1, "blue", "black"),
+                                       angle = 60, hjust = 1))
+  } else {p_waterfall = NULL}
+  
+  # =============================== Relative abundance plot =============================== 
+  sig_taxa = as.character(dat_fig1$taxon_id)
+  
+  if (length(sig_taxa) == 0) {
+    p_rel = NULL
+  } else {
+    rel_table = pseq %>%
+      microbiome::transform(transform = "compositional")
+    
+    dat_fig2 = data.frame(t(abundances(rel_table)[sig_taxa, , drop = FALSE]), 
+                          check.names = FALSE) %>%
+      rownames_to_column(sample_id) %>% 
+      left_join(meta_data, by = sample_id) %>%
+      dplyr::select(!!as.name(group), sig_taxa) %>% 
+      filter(!is.na(!!as.name(group))) %>%
+      group_by(!!as.name(group)) %>% 
+      summarise_all(mean)
+    
+    dat_fig2_long = dat_fig2 %>% 
+      pivot_longer(cols = -!!as.name(group), names_to = "taxon",
+                   values_to = "value") %>%
+      mutate(value = 100 * value)
+    dat_fig2_long$taxon = factor(dat_fig2_long$taxon, 
+                                 levels = unique(sig_taxa))
+    
+    p_rel = dat_fig2_long %>%
+      ggplot(aes(x = !!as.name(group), y = value, 
+                 fill = !!as.name(group))) +
+      geom_col(position = position_stack()) + 
+      facet_wrap(.~ taxon, scales = "free_y") +
+      scale_fill_discrete(name = NULL) +
+      labs(x = NULL, y = "Relative abundance (%)") + 
+      theme_bw() + 
+      theme(strip.background = element_rect(fill = "white"),
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank())
+  }
+  
+  # =============================== Results summary =============================== 
+  res_final = data.frame(beta = res$beta[, -1], se = res$se[, -1], 
+                         W = res$W[, -1], p = res$p_val[, -1], 
+                         q = res$q_val[, -1], check.names = FALSE) %>%
+    rownames_to_column("taxon_id") %>%
+    mutate_if(is.numeric, function(x) signif(x, 3))
+  
+  res_zero = out$zero_ind[[1]]
+  res_zero[res_zero == 1] = "Yes"
+  res_zero[res_zero == 0] = "No"
+  res_zero = data.frame(res_zero, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  res_final = res_final %>% 
+    left_join(res_zero, by = "taxon_id")
+  
+  obj = list(p_waterfall = p_waterfall,
+             p_rel = p_rel, out = res_final)
+  return(obj)
+}
+```
+
+```{r function2}
+multi_group_pipeline = function(pseq, sample_id, adj_formula, group, 
+                                p_adj_method, zero_cut, lib_cut, neg_lb, alpha){
+  feature_table = abundances(pseq); meta_data = meta(pseq)
+  struc_zero = TRUE; tol = 1e-5; max_iter = 100; conserve = FALSE; per_num = 1000
+  global = FALSE; direct = FALSE; dunnett = FALSE; pattern = NULL
+  out = ANCOM_BC(feature_table, meta_data, sample_id, adj_formula, p_adj_method, 
+                 zero_cut, lib_cut, struc_zero, neg_lb, group, 
+                 tol, max_iter, conserve, alpha, per_num,
+                 global, direct, dunnett, pattern)
+  res = out$res
+  
+  # =============================== Waterfall plot =============================
+  # Use p-values instead of q-values to make plots
+  ind_diff = res$p_val < alpha
+  res_beta = data.frame(res$beta * ind_diff, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  res_se = data.frame(res$se * ind_diff, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  res_p = data.frame(res$p * ind_diff, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  res_q = data.frame(res$q * ind_diff, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  
+  res_zero = out$zero_ind[[1]]
+  res_zero = res_zero - res_zero[, 1]
+  res_zero = abs(res_zero[, -1])
+  res_zero = data.frame(res_zero, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  
+  # Coerce the SE of structural zero to be zero
+  res_se[, grepl(group, colnames(res_se))] = res_se[, grepl(group, colnames(res_se))] *
+    (1 - res_zero[, grepl(group, colnames(res_zero))])
+  
+  res_beta = res_beta %>%
+    pivot_longer(cols = -taxon_id, names_to = "var", values_to = "lfc")
+  res_se = res_se %>%
+    pivot_longer(cols = -taxon_id, names_to = "var", values_to = "se")
+  res_p = res_p %>%
+    pivot_longer(cols = -taxon_id, names_to = "var", values_to = "p")
+  res_q = res_q %>%
+    pivot_longer(cols = -taxon_id, names_to = "var", values_to = "q")
+  
+  res_model = res_beta %>% 
+    left_join(res_se) %>%
+    left_join(res_p) %>%
+    left_join(res_q) %>%
+    left_join(res_zero, by = "taxon_id")
+  
+  # Waterfall plot for the covariate of interest
+  dat_fig1 = res_model %>%
+    filter(grepl(group, var),
+           lfc != 0) %>%
+    arrange(desc(lfc)) %>%
+    mutate(type = if_else(lfc > 0, "g1", "g2"),
+           star = case_when(p < .001 ~ "***",
+                            p < .01 ~ "**",
+                            TRUE ~ "*"),
+           color = if_else(q < .05, 1, 0),
+           pos = if_else(type == "g1", 
+                         lfc + se + 0.2,
+                         lfc - se - 0.2)
+    )
+  dat_fig1$taxon_id = factor(dat_fig1$taxon_id, 
+                             levels = unique(dat_fig1$taxon_id))
+  
+  if (nrow(dat_fig1) != 0) {
+    p_waterfall = dat_fig1 %>%
+      ggplot(aes(x = taxon_id, y = lfc, 
+                 fill = var, color = var)) + 
+      geom_bar(stat = "identity", width = 0.7, 
+               position = position_dodge(width = 0.85, preserve = "total")) +
+      geom_errorbar(aes(ymin = lfc - se, 
+                        ymax = lfc + se), 
+                    width = 0.2,
+                    position = position_dodge(0.85), color = "black") + 
+      geom_text(aes(y = pos, label = star), 
+                vjust = .7, color = "black", 
+                position = position_dodge(width = 0.85)) +
+      labs(x = NULL, y = "Log fold change") +
+      guides(color = FALSE) +
+      theme_bw() + 
+      theme(panel.grid.minor.y = element_blank(),
+            axis.text.x = element_text(size = 10, face = "bold",
+                                       color = ifelse(dat_fig1$color == 1, "blue", "black"),
+                                       angle = 60, hjust = 1))
+  } else {p_waterfall = NULL}
+  
+  # =============================== Relative abundance plot ====================
+  sig_taxa = as.character(dat_fig1$taxon_id)
+  
+  if (length(sig_taxa) == 0) {
+    p_rel = NULL
+  } else {
+    rel_table = pseq %>%
+      microbiome::transform(transform = "compositional")
+    
+    dat_fig2 = data.frame(t(abundances(rel_table)[sig_taxa, , drop = FALSE]), 
+                          check.names = FALSE) %>%
+      rownames_to_column(sample_id) %>% 
+      left_join(meta_data, by = sample_id) %>%
+      dplyr::select(!!as.name(group), sig_taxa) %>% 
+      filter(!is.na(!!as.name(group))) %>%
+      group_by(!!as.name(group)) %>% 
+      summarise_all(mean)
+    
+    dat_fig2_long = dat_fig2 %>% 
+      pivot_longer(cols = -!!as.name(group), names_to = "taxon",
+                   values_to = "value") %>%
+      mutate(value = 100 * value)
+    dat_fig2_long$taxon = factor(dat_fig2_long$taxon, 
+                                 levels = unique(sig_taxa))
+    
+    p_rel = dat_fig2_long %>%
+      ggplot(aes(x = !!as.name(group), y = value, 
+                 fill = !!as.name(group))) +
+      geom_col(position = position_stack()) + 
+      facet_wrap(.~ taxon, scales = "free_y") +
+      scale_fill_discrete(name = NULL) +
+      labs(x = NULL, y = "Relative abundance (%)") + 
+      theme_bw() + 
+      theme(strip.background = element_rect(fill = "white"),
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank())
+  }
+  
+  # =============================== Results summary ============================
+  res_final = data.frame(beta = res$beta[, -1], se = res$se[, -1], 
+                         W = res$W[, -1], p = res$p_val[, -1], 
+                         q = res$q_val[, -1], check.names = FALSE) %>%
+    rownames_to_column("taxon_id") %>%
+    mutate_if(is.numeric, function(x) signif(x, 3))
+  
+  res_zero = out$zero_ind[[1]]
+  res_zero[res_zero == 1] = "Yes"
+  res_zero[res_zero == 0] = "No"
+  res_zero = data.frame(res_zero, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  res_final = res_final %>% 
+    left_join(res_zero, by = "taxon_id")
+  
+  obj = list(p_waterfall = p_waterfall, 
+             p_rel = p_rel, out = res_final)
+  return(obj)
+}
+```
+
+# 1. Analyses at family level
+
+1. Number of stool samples `r nsamples(family_data)`,
+
+2. Number of families `r ntaxa(family_data)`.
+
+```{r, fig.width=12, fig.height=12}
+# NCs
+nc_family = subset_samples(family_data, status == "nc")
+# SCs
+sc_family = subset_samples(family_data, status == "sc")
+# 1st visit
+v1_family = subset_samples(family_data, visit == "v1")
+# 2nd visit
+v2_family = subset_samples(family_data, visit == "v2")
+# SCs at 1st visit
+sc_v1_family = subset_samples(sc_family, visit == "v1")
+# SCs at 2nd visit
+sc_v2_family = subset_samples(sc_family, visit == "v2")
+
+sample_id = "sampleid"; p_adj_method = "BH"
+zero_cut = 0.90; lib_cut = 1000; neg_lb = FALSE; alpha = 0.05
+
+# SC (Visit 1) - NC (Visit 1)
+obj1 = two_group_pipeline(v1_family, sample_id, adj_formula = "status + age", 
+                          group = "status", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res1 = obj1$out %>%
+  rename(Family = taxon_id)
+write_csv(res1, "../outputs/family_sc (v1) - nc (v1).csv")
+p4.1 = obj1$p_waterfall + 
+    labs(title = "SC (Visit 1) - NC (Visit 1)") +
+    scale_fill_brewer(palette = "Dark2",
+                      name = NULL,
+                      label = c("g1" = "Positive LFC",
+                                "g2" = "Negative LFC")) +
+    scale_color_brewer(palette = "Dark2") +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5)) 
+
+# SC (Visit 2) - NC (Visit 2)
+obj2 = two_group_pipeline(v2_family, sample_id, adj_formula = "status + age", 
+                          group = "status", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res2 = obj2$out %>%
+  rename(Family = taxon_id)
+write_csv(res2, "../outputs/family_sc (v2) - nc (v2).csv")
+p4.2 = obj2$p_waterfall + 
+    labs(title = "SC (Visit 2) - NC (Visit 2)") +
+    scale_fill_brewer(palette = "Dark2",
+                      name = NULL,
+                      label = c("g1" = "Positive LFC",
+                                "g2" = "Negative LFC")) +
+    scale_color_brewer(palette = "Dark2") +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+
+# SC (Visit 2) - NC (Visit 2)
+obj3 = two_group_pipeline(sc_family, sample_id, adj_formula = "visit + age", 
+                          group = "visit", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res3 = obj3$out %>%
+  rename(Family = taxon_id)
+write_csv(res3, "../outputs/family_sc (v2) - sc (v1).csv")
+p4.3 = obj3$p_waterfall + 
+    labs(title = "SC (Visit 2) - SC (Visit 1)") +
+    scale_fill_brewer(palette = "Dark2",
+                      name = NULL,
+                      label = c("g1" = "Positive LFC",
+                                "g2" = "Negative LFC")) +
+    scale_color_brewer(palette = "Dark2") +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+leg = get_legend(p4.3)
+p4.1 = p4.1 + theme(legend.position = "none")
+p4.2 = p4.2 + theme(legend.position = "none")
+p4.3 = p4.3 + theme(legend.position = "none")
+p4_1 = ggarrange(p4.1, p4.2, p4.3, leg, ncol = 2, nrow = 2, 
+                 labels = c("A", "B", "C"))
+
+# SC (Visit 1) Time to Develop AIDS
+obj4 = multi_group_pipeline(sc_v1_family, sample_id, adj_formula = "time2aids + age", 
+                            group = "time2aids", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res4 = obj4$out %>%
+  rename(Family = taxon_id)
+write_csv(res4, "../outputs/family_sc (v1) time2aids.csv")
+p4.4 = obj4$p_waterfall
+p4.4$data$var = factor(p4.4$data$var, levels = c("time2aids< 5 yrs", "time2aids5 - 10 yrs"))
+p4.4 = p4.4 + 
+    labs(title = "SC (Visit 1) Time to Develop AIDS") +
+    scale_fill_brewer(palette = "Set1",
+                      name = NULL,
+                      label = c("time2aids< 5 yrs" = "< 5 years vs. > 10 years",
+                                "time2aids5 - 10 yrs" = "5 - 10 years vs. > 10 years"),
+                      drop = FALSE) +
+    scale_color_brewer(palette = "Set1", drop = FALSE) +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+
+# SC (Visit 2) Time to Develop AIDS
+obj5 = multi_group_pipeline(sc_v2_family, sample_id, adj_formula = "time2aids + age", 
+                            group = "time2aids", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res5 = obj5$out %>%
+  rename(Family = taxon_id)
+write_csv(res5, "../outputs/family_sc (v2) time2aids.csv")
+p4.5 = obj5$p_waterfall
+p4.5$data$var = factor(p4.5$data$var, levels = c("time2aids< 5 yrs", "time2aids5 - 10 yrs"))
+p4.5 = p4.5 + 
+    labs(title = "SC (Visit 2) Time to Develop AIDS") +
+    scale_fill_brewer(palette = "Set1",
+                      name = NULL,
+                      label = c("time2aids< 5 yrs" = "< 5 years vs. > 10 years",
+                                "time2aids5 - 10 yrs" = "5 - 10 years vs. > 10 years"),
+                      drop = FALSE) +
+    scale_color_brewer(palette = "Set1", drop = FALSE) +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+p4_2 = ggarrange(p4.4, p4.5, ncol = 2, nrow = 1, labels = c("D", "E"),
+                 legend = "bottom", common.legend = TRUE)
+
+p4 = ggarrange(p4_1, p4_2, ncol = 1, nrow = 2, heights = c(2, 1))
+p4
+ggsave(plot = p4, "../images/main/fig4.pdf", height = 12, width = 12)   
+ggsave(plot = p4, "../images/main/fig4.jpeg", height = 12, width = 12, dpi = 300)
+```
+
+# 2. Analyses at genus level
+
+1. Number of stool samples `r nsamples(genus_data)`,
+
+2. Number of genera `r ntaxa(genus_data)`.
+
+```{r, fig.width=12, fig.height=12}
+# NCs
+nc_genus = subset_samples(genus_data3, status == "nc")
+# SCs
+sc_genus = subset_samples(genus_data3, status == "sc")
+# 1st visit
+v1_genus = subset_samples(genus_data3, visit == "v1")
+# 2nd visit
+v2_genus = subset_samples(genus_data3, visit == "v2")
+# SCs at 1st visit
+sc_v1_genus = subset_samples(sc_genus, visit == "v1")
+# SCs at 2nd visit
+sc_v2_genus = subset_samples(sc_genus, visit == "v2")
+
+sample_id = "sampleid"; p_adj_method = "BH"
+zero_cut = 0.90; lib_cut = 1000; neg_lb = FALSE; alpha = 0.05
+
+# SC (Visit 1) - NC (Visit 1)
+obj1 = two_group_pipeline(v1_genus, sample_id, adj_formula = "status + age", 
+                          group = "status", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res1 = obj1$out %>%
+  rename(Genus = taxon_id) %>%
+  left_join(as.data.frame(genus_table) %>% 
+              dplyr::select(Family, Genus), by = "Genus") %>%
+  dplyr::select(Family, everything())
+write_csv(res1, "../outputs/genus_sc (v1) - nc (v1).csv")
+ps5.1 = obj1$p_waterfall + 
+    labs(title = "SC (Visit 1) - NC (Visit 1)") +
+    scale_fill_brewer(palette = "Dark2",
+                      name = NULL,
+                      label = c("g1" = "Positive LFC",
+                                "g2" = "Negative LFC")) +
+    scale_color_brewer(palette = "Dark2") +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5)) 
+
+# SC (Visit 2) - NC (Visit 2)
+obj2 = two_group_pipeline(v2_genus, sample_id, adj_formula = "status + age", 
+                          group = "status", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res2 = obj2$out %>%
+  rename(Genus = taxon_id) %>%
+  left_join(as.data.frame(genus_table) %>% 
+              dplyr::select(Family, Genus), by = "Genus") %>%
+  dplyr::select(Family, everything())
+write_csv(res2, "../outputs/genus_sc (v2) - nc (v2).csv")
+ps5.2 = obj2$p_waterfall + 
+    labs(title = "SC (Visit 2) - NC (Visit 2)") +
+    scale_fill_brewer(palette = "Dark2",
+                      name = NULL,
+                      label = c("g1" = "Positive LFC",
+                                "g2" = "Negative LFC")) +
+    scale_color_brewer(palette = "Dark2") +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+
+# SC (Visit 2) - NC (Visit 2)
+obj3 = two_group_pipeline(sc_genus, sample_id, adj_formula = "visit + age", 
+                          group = "visit", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res3 = obj3$out %>%
+  rename(Genus = taxon_id) %>%
+  left_join(as.data.frame(genus_table) %>% 
+              dplyr::select(Family, Genus), by = "Genus") %>%
+  dplyr::select(Family, everything())
+write_csv(res3, "../outputs/genus_sc (v2) - sc (v1).csv")
+ps5.3 = obj3$p_waterfall + 
+    labs(title = "SC (Visit 2) - SC (Visit 1)") +
+    scale_fill_brewer(palette = "Dark2",
+                      name = NULL,
+                      label = c("g1" = "Positive LFC",
+                                "g2" = "Negative LFC")) +
+    scale_color_brewer(palette = "Dark2") +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+leg = get_legend(ps5.3)
+ps5.1 = ps5.1 + theme(legend.position = "none")
+ps5.2 = ps5.2 + theme(legend.position = "none")
+ps5.3 = ps5.3 + theme(legend.position = "none")
+ps5_1 = ggarrange(ps5.1, ps5.2, ps5.3, leg, ncol = 2, nrow = 2, 
+                 labels = c("A", "B", "C"))
+
+# SC (Visit 1) Time to Develop AIDS
+obj4 = multi_group_pipeline(sc_v1_genus, sample_id, adj_formula = "time2aids + age", 
+                            group = "time2aids", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res4 = obj4$out %>%
+  rename(Genus = taxon_id) %>%
+  left_join(as.data.frame(genus_table) %>% 
+              dplyr::select(Family, Genus), by = "Genus") %>%
+  dplyr::select(Family, everything())
+write_csv(res4, "../outputs/genus_sc (v1) time2aids.csv")
+ps5.4 = obj4$p_waterfall
+ps5.4$data$var = factor(ps5.4$data$var, levels = c("time2aids< 5 yrs", "time2aids5 - 10 yrs"))
+ps5.4 = ps5.4 + 
+    labs(title = "SC (Visit 1) Time to Develop AIDS") +
+    scale_fill_brewer(palette = "Set1",
+                      name = NULL,
+                      label = c("time2aids< 5 yrs" = "< 5 years vs. > 10 years",
+                                "time2aids5 - 10 yrs" = "5 - 10 years vs. > 10 years"),
+                      drop = FALSE) +
+    scale_color_brewer(palette = "Set1", drop = FALSE) +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+
+# SC (Visit 2) Time to Develop AIDS
+obj5 = multi_group_pipeline(sc_v2_genus, sample_id, adj_formula = "time2aids + age", 
+                            group = "time2aids", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res5 = obj5$out %>%
+  rename(Genus = taxon_id) %>%
+  left_join(as.data.frame(genus_table) %>% 
+              dplyr::select(Family, Genus), by = "Genus") %>%
+  dplyr::select(Family, everything())
+write_csv(res5, "../outputs/genus_sc (v2) time2aids.csv")
+ps5.5 = obj5$p_waterfall
+ps5.5$data$var = factor(ps5.5$data$var, levels = c("time2aids< 5 yrs", "time2aids5 - 10 yrs"))
+ps5.5 = ps5.5 + 
+    labs(title = "SC (Visit 2) Time to Develop AIDS") +
+    scale_fill_brewer(palette = "Set1",
+                      name = NULL,
+                      label = c("time2aids< 5 yrs" = "< 5 years vs. > 10 years",
+                                "time2aids5 - 10 yrs" = "5 - 10 years vs. > 10 years"),
+                      drop = FALSE) +
+    scale_color_brewer(palette = "Set1", drop = FALSE) +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+ps5_2 = ggarrange(ps5.4, ps5.5, ncol = 2, nrow = 1, labels = c("D", "E"),
+                 legend = "bottom", common.legend = TRUE)
+
+ps5 = ggarrange(ps5_1, ps5_2, ncol = 1, nrow = 2, heights = c(2, 1))
+ps5
+ggsave(plot = ps5, "../images/supplementary/fig_s5.pdf", height = 12, width = 12)   
+ggsave(plot = ps5, "../images/supplementary/fig_s5.jpeg", height = 12, width = 12, dpi = 300)
+```
+
+# 3. Analyses at species level
+
+1. Number of stool samples `r nsamples(species_data)`,
+
+2. Number of species `r ntaxa(species_data)`.
+
+```{r, fig.width=12, fig.height=12}
+# NCs
+nc_species = subset_samples(species_data2, status == "nc")
+# SCs
+sc_species = subset_samples(species_data2, status == "sc")
+# 1st visit
+v1_species = subset_samples(species_data2, visit == "v1")
+# 2nd visit
+v2_species = subset_samples(species_data2, visit == "v2")
+# SCs at 1st visit
+sc_v1_species = subset_samples(sc_species, visit == "v1")
+# SCs at 2nd visit
+sc_v2_species = subset_samples(sc_species, visit == "v2")
+
+sample_id = "sampleid"; p_adj_method = "BH"
+zero_cut = 0.90; lib_cut = 1000; neg_lb = FALSE; alpha = 0.05
+
+# SC (Visit 1) - NC (Visit 1)
+obj1 = two_group_pipeline(v1_species, sample_id, adj_formula = "status + age", 
+                          group = "status", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res1 = obj1$out %>%
+  rename(Species = taxon_id) %>%
+  left_join(as.data.frame(species_table) %>% 
+              dplyr::select(Family, Genus, Species), by = "Species") %>%
+  dplyr::select(Family, Genus, everything())
+write_csv(res1, "../outputs/species_sc (v1) - nc (v1).csv")
+p5.1 = obj1$p_waterfall + 
+    labs(title = "SC (Visit 1) - NC (Visit 1)") +
+    scale_fill_brewer(palette = "Dark2",
+                      name = NULL,
+                      label = c("g1" = "Positive LFC",
+                                "g2" = "Negative LFC")) +
+    scale_color_brewer(palette = "Dark2") +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5)) 
+
+# SC (Visit 2) - NC (Visit 2)
+obj2 = two_group_pipeline(v2_species, sample_id, adj_formula = "status + age", 
+                          group = "status", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res2 = obj2$out %>%
+  rename(Species = taxon_id) %>%
+  left_join(as.data.frame(species_table) %>% 
+              dplyr::select(Family, Genus, Species), by = "Species") %>%
+  dplyr::select(Family, Genus, everything())
+write_csv(res2, "../outputs/species_sc (v2) - nc (v2).csv")
+p5.2 = obj2$p_waterfall + 
+    labs(title = "SC (Visit 2) - NC (Visit 2)") +
+    scale_fill_brewer(palette = "Dark2",
+                      name = NULL,
+                      label = c("g1" = "Positive LFC",
+                                "g2" = "Negative LFC")) +
+    scale_color_brewer(palette = "Dark2") +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+
+# SC (Visit 2) - NC (Visit 2)
+obj3 = two_group_pipeline(sc_species, sample_id, adj_formula = "visit + age", 
+                          group = "visit", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res3 = obj3$out %>%
+  rename(Species = taxon_id) %>%
+  left_join(as.data.frame(species_table) %>% 
+              dplyr::select(Family, Genus, Species), by = "Species") %>%
+  dplyr::select(Family, Genus, everything())
+write_csv(res3, "../outputs/species_sc (v2) - sc (v1).csv")
+p5.3 = obj3$p_waterfall
+p5.3$data$type = factor(p5.3$data$type, levels = c("g1", "g2"))
+p5.3 = p5.3 + 
+    labs(title = "SC (Visit 2) - SC (Visit 1)") +
+    scale_fill_brewer(palette = "Dark2",
+                      name = NULL,
+                      label = c("g1" = "Positive LFC",
+                                "g2" = "Negative LFC"),
+                      drop = FALSE) +
+    scale_color_brewer(palette = "Dark2", drop = FALSE) +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+leg = get_legend(p5.3)
+p5.1 = p5.1 + theme(legend.position = "none")
+p5.2 = p5.2 + theme(legend.position = "none")
+p5.3 = p5.3 + theme(legend.position = "none")
+p5_1 = ggarrange(p5.1, p5.2, p5.3, leg, ncol = 2, nrow = 2, 
+                 labels = c("A", "B", "C"))
+
+# SC (Visit 1) Time to Develop AIDS
+obj4 = multi_group_pipeline(sc_v1_species, sample_id, adj_formula = "time2aids + age", 
+                            group = "time2aids", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res4 = obj4$out %>%
+  rename(Species = taxon_id) %>%
+  left_join(as.data.frame(species_table) %>% 
+              dplyr::select(Family, Genus, Species), by = "Species") %>%
+  dplyr::select(Family, Genus, everything())
+write_csv(res4, "../outputs/species_sc (v1) time2aids.csv")
+p5.4 = obj4$p_waterfall
+p5.4$data$var = factor(p5.4$data$var, levels = c("time2aids< 5 yrs", "time2aids5 - 10 yrs"))
+p5.4 = p5.4 + 
+    labs(title = "SC (Visit 1) Time to Develop AIDS") +
+    scale_fill_brewer(palette = "Set1",
+                      name = NULL,
+                      label = c("time2aids< 5 yrs" = "< 5 years vs. > 10 years",
+                                "time2aids5 - 10 yrs" = "5 - 10 years vs. > 10 years"),
+                      drop = FALSE) +
+    scale_color_brewer(palette = "Set1", drop = FALSE) +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+
+# SC (Visit 2) Time to Develop AIDS
+obj5 = multi_group_pipeline(sc_v2_species, sample_id, adj_formula = "time2aids + age", 
+                            group = "time2aids", p_adj_method, zero_cut, lib_cut, neg_lb, alpha)
+res5 = obj5$out %>%
+  rename(Species = taxon_id) %>%
+  left_join(as.data.frame(species_table) %>% 
+              dplyr::select(Family, Genus, Species), by = "Species") %>%
+  dplyr::select(Family, Genus, everything())
+write_csv(res5, "../outputs/species_sc (v2) time2aids.csv")
+p5.5 = obj5$p_waterfall
+p5.5$data$var = factor(p5.5$data$var, levels = c("time2aids< 5 yrs", "time2aids5 - 10 yrs"))
+p5.5 = p5.5 + 
+    labs(title = "SC (Visit 2) Time to Develop AIDS") +
+    scale_fill_brewer(palette = "Set1",
+                      name = NULL,
+                      label = c("time2aids< 5 yrs" = "< 5 years vs. > 10 years",
+                                "time2aids5 - 10 yrs" = "5 - 10 years vs. > 10 years"),
+                      drop = FALSE) +
+    scale_color_brewer(palette = "Set1", drop = FALSE) +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+p5_2 = ggarrange(p5.4, p5.5, ncol = 2, nrow = 1, labels = c("D", "E"),
+                 legend = "bottom", common.legend = TRUE)
+
+p5 = ggarrange(p5_1, p5_2, ncol = 1, nrow = 2, heights = c(2, 1))
+p5
+ggsave(plot = p5, "../images/main/fig5.pdf", height = 12, width = 12)   
+ggsave(plot = p5, "../images/main/fig5.jpeg", height = 12, width = 12, dpi = 300)
+```
+
+# Session information
+
+```{r, message = FALSE, warning = FALSE, comment = NA}
+sessionInfo()
+```

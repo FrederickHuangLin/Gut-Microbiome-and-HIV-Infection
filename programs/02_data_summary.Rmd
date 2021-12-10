@@ -1,0 +1,542 @@
+---
+title: "Data Summary"
+author: 
+  - Huang Lin$^1$
+  - $^1$Department of Biostatistics, University of Pittsburgh, 130 De Soto Street, Pittsburgh, PA 15261 USA
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: 
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+# rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, 
+                      message = FALSE, comment = NA,
+                      fig.width = 6.25, fig.height = 5)
+options(scipen = 999,
+        digits = 2)
+
+library(readr)
+library(tidyverse) 
+library(magrittr)
+library(qwraps2)
+library(ggpubr)
+library(microbiome)
+library(vegan)
+
+df_total = read_csv("../data/df_merge.csv")
+```
+
+# 1. Sequence counts
+
+```{r}
+df_fig = read_csv("../data/per-sample-fastq-counts.csv")
+df_fig = df_fig %>%
+  filter(`Sample ID` %in% df_total$sampleid)
+
+bin_length = 4000
+b = seq(0, 140000, bin_length)
+p = df_fig %>% 
+  ggplot(aes(x = `Sequence count`)) +
+  geom_histogram(aes(y = ..count..), breaks = b, color = "black", fill = "lightblue1") +
+  geom_density(aes(y = ..density..* (nrow(df_fig) * bin_length)), color = "brown3") +
+  scale_x_continuous(breaks = seq(20000, 140000, 40000)) +
+  labs(x = "Read Number", y = "Number of Samples", title = "Reads per sample",
+       subtitle = paste0("Min = ", min(df_fig$`Sequence count`), " (", 
+                         df_fig$`Sample ID`[which.min(df_fig$`Sequence count`)], ") \n",
+                         "Max = ", max(df_fig$`Sequence count`), " (", 
+                         df_fig$`Sample ID`[which.max(df_fig$`Sequence count`)], ")")) + 
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+p
+ggsave("../images/supplementary/fig_s1.pdf", height = 5, width = 8)
+ggsave("../images/supplementary/fig_s1.jpeg", height = 5, width = 8, dpi = 300)
+
+tol_reads = sum(df_fig$`Sequence count`)
+mean_reads = mean(df_fig$`Sequence count`)
+```
+
+1. Number of samples: `r nrow(df_fig)`
+
+2. Total number of sequences: `r tol_reads`
+
+3. Average reads: `r mean_reads`
+
+# 2. Patient summary
+
+## 2.1 Table
+
+```{r}
+df_total = df_total %>% 
+  transmute(subjid, status, visit, visit_num, age, duration, time2aids,
+            cd4 = leu3n, cd8 = leu2n, ratio = cd4/cd8, 
+            vload = ifelse(status == "nc", NA, vload),
+            il6, cd163, ip10, crp, lbp, cd14, 
+            acetate, propionate, butyrate, valerate)
+df_total$visit = recode(df_total$visit, `v1` = "Visit 1", `v2` = "Visit 2")
+df_total$time2aids = recode(df_total$time2aids, 
+                            `0-2` = "< 5 yrs", `2-5` = "< 5 yrs",
+                            `5-7` = "5 - 10 yrs", `7-10` = "5 - 10 yrs",
+                            `10+` = "> 10 yrs", `never` = "non")
+```
+
+```{r}
+options(qwraps2_markup = "markdown")
+summary_template1 =
+  list("Data type" =
+         list("Both visit 1 & 2" = ~ qwraps2::n_perc0(sum_visit == 3, na_rm = T),
+              "Visit 1 only" = ~ qwraps2::n_perc0(sum_visit == 1, na_rm = T),
+              "Visit 2 only" = ~ qwraps2::n_perc0(sum_visit == 2, na_rm = T)),
+       "Time period for paired data (days)" = 
+         list("min" = ~ round(min(duration, na.rm = T), 2),
+              "max" = ~ round(max(duration, na.rm = T), 2),
+              "mean (sd)" = ~ qwraps2::mean_sd(duration, na_rm = T, show_n = "never"))
+  )
+
+summary_template2 =
+  list("Age" =
+         list("min" = ~ round(min(age, na.rm = T), 2),
+              "max" = ~ round(max(age, na.rm = T), 2),
+              "mean (sd)" = ~ qwraps2::mean_sd(age, na_rm = T, show_n = "never")),
+       "Time to Develop AIDS" =
+         list("< 5 years" = ~ n_perc0(time2aids == "< 5 yrs", na_rm = T),
+              "5 - 10 years" = ~ n_perc0(time2aids == "5 - 10 yrs", na_rm = T),
+              "> 10 years" = ~ n_perc0(time2aids == "> 10 yrs", na_rm = T),
+              "Non-progressor" = ~ n_perc0(time2aids == "non", na_rm = T))
+  )
+
+summary_template3 =
+  list("CD4+ T cell/mm3" =
+         list("min" = ~ round(min(cd4, na.rm = T), 2),
+              "max" = ~ round(max(cd4, na.rm = T), 2),
+              "mean (sd)" = ~ qwraps2::mean_sd(cd4, na_rm = T, show_n = "never")),
+       "CD8+ T cell/mm3" =
+         list("min" = ~ round(min(cd8, na.rm = T), 2),
+              "max" = ~ round(max(cd8, na.rm = T), 2),
+              "mean (sd)" = ~ qwraps2::mean_sd(cd8, na_rm = T, show_n = "never")),
+       "CD4+/CD8+" =
+         list("min" = ~ round(min(ratio, na.rm = T), 2),
+              "max" = ~ round(max(ratio, na.rm = T), 2),
+              "mean (sd)" = ~ qwraps2::mean_sd(ratio, na_rm = T, show_n = "never")),
+       "HIV load" =
+         list("min" = ~ round(min(vload, na.rm = T), 2),
+              "max" = ~ round(max(vload, na.rm = T), 2),
+              "mean (sd)" = ~ qwraps2::mean_sd(vload, na_rm = T, show_n = "never"))
+  )
+```
+
+```{r, results='asis'}
+df_pair = df_total %>% 
+  transmute(subjid, status, visit, duration) %>%
+  mutate(visit_num = if_else(visit == "Visit 1", 1, 2))
+df_pair = df_pair %>% 
+  group_by(subjid, status) %>%
+  summarise(sum_visit = sum(visit_num, na.rm = TRUE),
+            duration = unique(duration))
+p_val1 = round(with(data = df_pair, 
+                    chisq.test(x = status, y = sum_visit)$p.value), 2)
+p_val2 = round(kruskal.test(duration ~ status, data = df_pair)$p.value, 2)
+
+tab1 = df_pair %>% 
+  group_by(status) %>% 
+  summary_table(summary_template1)
+tab1 = cbind(tab1, "P-value" = "", "Comments" = "")
+tab1[grepl("Visit 2 only", rownames(tab1)), "P-value"] = p_val1
+tab1[grepl("Visit 2 only", rownames(tab1)), "Comments"] = "Chi-squared Test"
+tab1[grepl("mean \\(sd\\)", rownames(tab1)), "P-value"] = p_val2
+tab1[grepl("mean \\(sd\\)", rownames(tab1)), "Comments"] = "Kruskal-Wallis Rank Sum Test"
+
+df_total_unique = df_total %>% 
+  dplyr::select(subjid, status, age, time2aids) %>%
+  distinct_all()
+p_val3 = round(kruskal.test(age ~ status, data = df_total_unique)$p.value, 2)
+p_val4 = round(with(data = df_total_unique, 
+                    chisq.test(x = status, y = time2aids)$p.value), 2)
+
+tab2 = df_total_unique %>% 
+  group_by(status) %>% 
+  summary_table(summary_template2)
+tab2 = cbind(tab2, "P-value" = "", "Comments" = "")
+tab2[grepl("mean \\(sd\\)", rownames(tab2)), "P-value"] = p_val3
+tab2[grepl("mean \\(sd\\)", rownames(tab2)), "Comments"] = "Kruskal-Wallis Rank Sum Test"
+tab2[grepl("Non-progressor", rownames(tab2)), "P-value"] = p_val4
+tab2[grepl("Non-progressor", rownames(tab2)), "Comments"] = "Chi-squared Test"
+
+tab3 = df_total %>% 
+  filter(status == "sc") %>% 
+  group_by(visit) %>% 
+  summary_table(summary_template3)
+
+tab4 = df_total %>% 
+  filter(status == "nc") %>% 
+  group_by(visit) %>% 
+  summary_table(summary_template3)
+
+print(tab1, rtitle = "All Study Participants")
+print(tab2, rtitle = "All Study Participants")
+print(tab3, rtitle = "HIV Seroconverters")
+print(tab4, rtitle = "HIV Negative Controls")
+```
+
+## 2.2 Figure
+
+### 2.21 CD4, CD8, CD4/CD8, HIV viral load
+
+```{r, fig.width=12, fig.height=8}
+df_fig = df_total %>% 
+  dplyr::select(subjid, status, visit, cd4, cd8, ratio)
+
+# CD4
+df_p = df_fig %>% group_by(visit) %>%
+  do(test = kruskal.test(cd4 ~ status, data = .)) %>%
+  summarise(p = test$p.value)
+
+df_ann = df_fig %>% group_by(visit) %>%
+  summarise(x = 1, y = 1.01 * max(cd4, na.rm = TRUE),
+            y_max = 1.1 * max(cd4, na.rm = TRUE),
+            status = "nc") %>%
+  mutate(p = df_p$p, label = paste0("p = ", signif(p, 2)))
+
+p1.1 = ggplot(data = df_fig, aes(x = status, y = cd4)) + 
+  geom_boxplot(aes(fill = status)) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  scale_fill_discrete(name = NULL, 
+                      labels = c("nc" = "NC", "sc" = "SC")) +
+  geom_point(alpha = 0.5, shape = 16, position = position_jitter(0.2), size = 0.8) +
+  facet_wrap(.~visit, scale = "free", nrow = 1) + 
+  geom_label(data = df_ann, aes(x = x, y = y, label = label), 
+             size = 4, vjust = -0.5, hjust = 0, color = "black") + 
+  labs(x = NULL, y = NULL, 
+       title = expression(paste(CD4^{"+"}, " T Cell/", mm^3))) + 
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "bottom",
+        axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+
+# CD8
+df_p = df_fig %>% group_by(visit) %>%
+  do(test = kruskal.test(cd8 ~ status, data = .)) %>%
+  summarise(p = test$p.value)
+
+df_ann = df_fig %>% group_by(visit) %>%
+  summarise(x = 1, y = 1.01 * max(cd8, na.rm = TRUE),
+            y_max = 1.1 * max(cd8, na.rm = TRUE),
+            status = "nc") %>%
+  mutate(p = df_p$p, label = paste0("p = ", signif(p, 2)))
+
+p1.2 = ggplot(data = df_fig, aes(x = status, y = cd8)) + 
+  geom_boxplot(aes(fill = status)) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  scale_fill_discrete(name = NULL, 
+                      labels = c("nc" = "NC", "sc" = "SC")) +
+  geom_point(alpha = 0.5, shape = 16, position = position_jitter(0.2), size = 0.8) +
+  facet_wrap(.~visit, scale = "free", nrow = 1) + 
+  geom_label(data = df_ann, aes(x = x, y = y, label = label), 
+             size = 4, vjust = -0.5, hjust = 0, color = "black") + 
+  labs(x = NULL, y = NULL, 
+       title = expression(paste(CD8^{"+"}, " T Cell/", mm^3))) + 
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "bottom",
+        axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+
+# CD4/CD8
+df_p = df_fig %>% group_by(visit) %>%
+  do(test = kruskal.test(ratio ~ status, data = .)) %>%
+  summarise(p = test$p.value)
+
+df_ann = df_fig %>% group_by(visit) %>%
+  summarise(x = 1, y = 1.01 * max(ratio, na.rm = TRUE),
+            y_max = 1.1 * max(ratio, na.rm = TRUE),
+            status = "nc") %>%
+  mutate(p = df_p$p, label = paste0("p = ", signif(p, 2)))
+
+p1.3 = ggplot(data = df_fig, aes(x = status, y = ratio)) + 
+  geom_boxplot(aes(fill = status)) +
+  geom_blank(data = df_ann, aes(y = y_max)) +
+  scale_fill_discrete(name = NULL, 
+                      labels = c("nc" = "NC", "sc" = "SC")) +
+  geom_point(alpha = 0.5, shape = 16, position = position_jitter(0.2), size = 0.8) +
+  facet_wrap(.~visit, scale = "free", nrow = 1) + 
+  geom_label(data = df_ann, aes(x = x, y = y, label = label), 
+             size = 4, vjust = -0.5, hjust = 0, color = "black") + 
+  labs(x = NULL, y = NULL, 
+       title = expression(paste(CD4^{"+"}, "/", CD8^{"+"}))) + 
+  theme_bw() + 
+  theme(strip.background = element_rect(fill = "white"), 
+        legend.position = "bottom",
+        axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+
+# HIV viral load
+df_fig = df_total %>% 
+  dplyr::select(subjid, status, visit, vload) %>%
+  filter(status == "sc", visit == "Visit 2") %>%
+  mutate(log10_vload = log(vload, base = 10))
+
+bin_length = 0.5
+b = seq(0, 8, bin_length)
+p1.4 = df_fig %>% 
+  ggplot(aes(x = log10_vload)) +
+  geom_histogram(aes(y = ..count..), breaks = b, color = "black", fill = "lightblue1") +
+  geom_density(aes(y = ..density..* (nrow(df_fig) * bin_length)), color = "brown3") +
+  scale_x_continuous(breaks = b) +
+  labs(x = expression(paste(log[10], "(Viral Load)")), 
+       y = "Number of SC", 
+       title = "HIV Viral Load for SC at Visit 2",
+       subtitle = paste0("Min = ", min(df_fig$vload, na.rm = TRUE), " (", 
+                         df_fig$subjid[which.min(df_fig$vload)], ") \n",
+                         "Max = ", max(df_fig$vload, na.rm = TRUE), " (", 
+                         df_fig$subjid[which.max(df_fig$vload)], ")")) + 
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 60, hjust = 1))
+
+p1 = ggarrange(p1.1, p1.2, p1.3, p1.4, 
+               labels = c("A", "B", "C", "D"),
+               ncol = 2, nrow = 2)
+p1
+ggsave(plot = p1, "../images/main/fig1.pdf", height = 8, width = 12)   
+ggsave(plot = p1, "../images/main/fig1.jpeg", height = 8, width = 12, dpi = 300)
+```
+
+### 2.22 Cytokines
+
+```{r}
+df_fig = df_total %>% 
+  dplyr::select(subjid, status, visit, 
+                il6, cd163, ip10, crp, lbp, cd14) %>%
+  group_by(visit, status) %>%
+  summarise(il6 = mean(il6, na.rm = TRUE), 
+            cd163 = mean(cd163, na.rm = TRUE), 
+            ip10 = mean(ip10, na.rm = TRUE), 
+            crp = mean(crp, na.rm = TRUE), 
+            lbp = mean(lbp, na.rm = TRUE), 
+            cd14 = mean(cd14, na.rm = TRUE))
+
+df_fig_long = df_fig %>% 
+  gather(key = "cytokine", value = "value", il6:cd14)
+df_fig_long$status = recode(df_fig_long$status, ctrl = "NC", sc = "SC")
+df_fig_long$cytokine = recode(df_fig_long$cytokine,
+                              il6 = "IL-6", cd163 = "CD163", ip10 = "IP10",
+                              crp = "CRP", lbp = "LBP", cd14 = "CD14")
+
+p2 = ggplot(df_fig_long, aes(x = status, y = value, fill = cytokine)) +
+  geom_col(position = "stack", width = 1, color = "black") +
+  facet_wrap(.~visit, scale = "free", nrow = 1) + 
+  labs(x = NULL, y = "Value (pg/ml)", title = "Cytokine Composition") +
+  scale_fill_brewer(palette = "Dark2", name = NULL) + 
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        strip.background = element_rect(fill = "white"),
+        legend.position = "bottom")
+p2
+```
+
+### 2.23 SCFA
+
+```{r}
+df_fig = df_total %>% 
+  dplyr::select(subjid, status, visit, 
+                acetate, propionate, butyrate, valerate) %>%
+  group_by(visit, status) %>%
+  summarise(acetate = mean(acetate, na.rm = TRUE), 
+            propionate = mean(propionate, na.rm = TRUE), 
+            butyrate = mean(butyrate, na.rm = TRUE), 
+            valerate = mean(valerate, na.rm = TRUE))
+
+df_fig_long = df_fig %>% gather(key = "scfa", value = "value", acetate:valerate)
+df_fig_long$status = recode(df_fig_long$status, ctrl = "NC", sc = "SC")
+df_fig_long$scfa = recode(df_fig_long$scfa,
+                          acetate = "Acetate", butyrate = "Butyrate", 
+                          propionate = "Propionate", valerate = "Valerate")
+
+p3 = ggplot(df_fig_long, aes(x = status, y = value, fill = scfa)) +
+  geom_col(position = "stack", width = 1, color = "black") +
+  facet_wrap(.~visit, scale = "free", nrow = 1) + 
+  labs(x = NULL, y = "Value (ug/mg)", title = "SCFA Composition") +
+  scale_fill_brewer(palette = "Dark2", name = NULL) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        strip.background = element_rect(fill = "white"),
+        legend.position = "bottom")
+p3
+```
+
+### 2.24 Microbiome
+
+#### 2.241 Phylum composition
+
+```{r, fig.height=10, fig.width=10}
+# OTU table
+otu_table = read_tsv("../data/otu-table.tsv")
+otu_id = otu_table$`#OTU ID`
+otu_table = data.frame(otu_table[, -1], check.names = FALSE, row.names = otu_id)
+
+# Taxonomy table
+tax = read_tsv("../data/taxonomy.tsv")
+otu_id = tax$`Feature ID`
+tax = data.frame(tax[, - c(1, 3)], row.names = otu_id)
+tax = tax %>% separate(col = Taxon, 
+                       into = c("Kingdom", "Phylum", "Class", "Order", 
+                                "Family", "Genus", "Species"),
+                       sep = ";")
+for (i in 1:ncol(tax)) {
+  tax[, i] = sapply(tax[, i], function(x) str_split(x, "__")[[1]][2])
+}
+tax = as.matrix(tax)
+tax[tax == ""] = NA
+
+# Tree
+tree = read_tree("../data/tree.nwk")
+
+# Meta data
+meta_data = read_csv("../data/df_merge.csv")
+meta_data$status = factor(meta_data$status, levels = c("nc", "sc"))
+meta_data$visit = factor(meta_data$visit, levels = c("v1", "v2"))
+meta_data$time2aids = factor(meta_data$time2aids, 
+                             levels = c("rapid", "slow", "never"))
+meta_data$loc = factor(recode(meta_data$loc, 
+                              `1` = "Location 1", `2` = "Location 2", 
+                              `3` = "Location 3", `4` = "Location 4"))
+
+# Phyloseq object
+OTU = otu_table(otu_table, taxa_are_rows = TRUE)
+META = sample_data(meta_data)
+sample_names(META) = meta_data$sampleid
+TAX = tax_table(tax)
+otu_data = phyloseq(OTU, TAX, META, tree)
+phylum_data = aggregate_taxa(otu_data, "Phylum")
+
+# NCs 
+# visit 1
+phylum_data1 = subset_samples(phylum_data, status == "nc" & visit == "v1")
+df_fig = data.frame(taxon = taxa_names(phylum_data1), value = taxa_sums(phylum_data1)) %>%
+  filter(taxon != "Unknown") %>%
+  mutate(prop = round(value / sum(value) * 100, 1),
+         per = paste0(prop, "%"), 
+         label = ifelse(prop <= 2, NA, per))
+
+p4.11 = ggplot(df_fig, aes(x = "", y = value, fill = taxon)) +
+  geom_col(position = "stack", width = 1, color = "black") +
+  geom_text(aes(label = label, x = 1.3),
+            position = position_stack(vjust = 0.5)) +
+  coord_polar("y", start = 0) +
+  labs(title = "NC: Visit 1") +
+  scale_fill_discrete(name = NULL) +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# visit 2
+phylum_data2 = subset_samples(phylum_data, status == "nc" & visit == "v2")
+df_fig = data.frame(taxon = taxa_names(phylum_data2), value = taxa_sums(phylum_data2)) %>%
+  filter(taxon != "Unknown") %>%
+  mutate(prop = round(value / sum(value) * 100, 1),
+         per = paste0(prop, "%"), 
+         label = ifelse(prop <= 2, NA, per))
+
+p4.12 = ggplot(df_fig, aes(x = "", y = value, fill = taxon)) +
+  geom_col(position = "stack", width = 1, color = "black") +
+  geom_text(aes(label = label, x = 1.3),
+            position = position_stack(vjust = 0.5)) +
+  coord_polar("y", start = 0) +
+  labs(title = "NC: Visit 2") +
+  scale_fill_discrete(name = NULL) +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# SCs 
+# visit 1
+phylum_data3 = subset_samples(phylum_data, status == "sc" & visit == "v1")
+df_fig = data.frame(taxon = taxa_names(phylum_data3), value = taxa_sums(phylum_data3)) %>%
+  filter(taxon != "Unknown") %>%
+  mutate(prop = round(value / sum(value) * 100, 1),
+         per = paste0(prop, "%"), 
+         label = ifelse(prop <= 2, NA, per))
+
+p4.21 = ggplot(df_fig, aes(x = "", y = value, fill = taxon)) +
+  geom_col(position = "stack", width = 1, color = "black") +
+  geom_text(aes(label = label, x = 1.3),
+            position = position_stack(vjust = 0.5)) +
+  coord_polar("y", start = 0) +
+  labs(title = "SC: Visit 1") +
+  scale_fill_discrete(name = NULL) +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# visit 2
+phylum_data4 = subset_samples(phylum_data, status == "sc" & visit == "v2")
+df_fig = data.frame(taxon = taxa_names(phylum_data4), value = taxa_sums(phylum_data4)) %>%
+  filter(taxon != "Unknown") %>%
+  mutate(prop = round(value / sum(value) * 100, 1),
+         per = paste0(prop, "%"), 
+         label = ifelse(prop <= 2, NA, per))
+
+p4.22 = ggplot(df_fig, aes(x = "", y = value, fill = taxon)) +
+  geom_col(position = "stack", width = 1, color = "black") +
+  geom_text(aes(label = label, x = 1.3),
+            position = position_stack(vjust = 0.5)) +
+  coord_polar("y", start = 0) +
+  labs(title = "SC: Visit 2") +
+  scale_fill_discrete(name = NULL) +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p4 = ggarrange(p4.11, p4.12, p4.21, p4.22, ncol = 2, nrow = 2, 
+               legend = "bottom", common.legend = TRUE)
+p4 = annotate_figure(p4, top = text_grob("Phylum Composition", size = 14))
+p4
+ggsave("../images/supplementary/fig_s4.pdf", height = 10, width = 10)   
+ggsave("../images/supplementary/fig_s4.jpeg", height = 10, width = 10, dpi = 300)
+```
+
+#### 2.252 PCoA plot by location
+
+```{r, fig.height=6, fig.width=8}
+species_data = aggregate_taxa(otu_data, "Species")
+species_rarefied = rarefy_even_depth(species_data, rngseed = 1, 
+                                 sample.size = 0.9 * min(sample_sums(species_data)), 
+                                 replace = FALSE)
+
+set.seed(123)
+# PERMANOVA
+permanova = adonis(t(abundances(species_rarefied)) ~ loc, 
+                   data = meta(species_rarefied), 
+                   permutations = 999, method = "bray")$aov.tab
+
+# PERMDISP
+dis = vegdist(t(abundances(species_rarefied)), method = "bray")
+groups = meta(species_rarefied)$loc
+mod = betadisper(d = dis, group = groups, type = "median")
+
+# Draw the Plot
+labs = paste0("PCoA", 1:2, " (", signif(100 * mod$eig / sum(mod$eig), 3), "%)")
+plot(mod, pch = 15:16, cex.lab = 1.25, cex = 1, 
+     main = "PCoA Plot by Location", 
+     xlab = labs[1], ylab = labs[2],
+     xlim = c(-0.6, 0.6), ylim = c(-0.4, 0.4),
+     col = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3"), sub = NULL,
+     hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+legend(0.4, 0.4, legend = c("Location 1", "Location 2", "Location 3", "Location 4"),
+       col = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3"), pch = 15:16, cex = 0.8)
+legend(x = 0.3, y = -0.2, cex = 0.7,
+       legend = c(paste0("p (PERMANOVA) = ", signif(permanova$`Pr(>F)`[1], 2)),
+                  paste0("p (PERMDISP) = ", signif(permutest(mod)$tab$`Pr(>F)`[1], 2))))
+```
+
+# Session information
+
+```{r, message = FALSE, warning = FALSE, comment = NA}
+sessionInfo()
+```
+
+
+
+
+
